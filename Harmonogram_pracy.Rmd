@@ -1,0 +1,48 @@
+---
+title: "Projekt Inżynierski - Harmonogram Pracy"
+author: "Kacper Szmigielski, Szymon Smoła, Laura Nowak"
+date: "2026-10-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+##  Harmonogram pracy
+
+- **19.10** - przygotowanie przeglądu literatury oraz harmonogramu pracy,
+
+- **26.10** - dokładne zapoznanie się z wybranymi modelami i zrozumienie zasad ich działania,
+
+- **02.11** - wybór odpowiednich zbiorów danych oraz oprogramowania,
+
+- **12.11** - przygotowanie etapu II, opracowanie planu eksperymentów oraz wybór metryk oceny,
+
+- **19.11** - implementacja wybranych modeli oraz wykonanie pierwszych analiz,
+
+- **26.11** - przygotowanie pierwszej prezentacji: omówienie podjętych zagadnień i badanych danych, przedstawienie pierwszych eksperymentów oraz dalszych planów realizacji,
+
+- **03.12** - przeprowadzenie wszystkich eksperymentów i zebranie wyników,
+
+- **10.12** - przygotowanie prezentacji końcowej z wyszczególnieniem najważniejszych wniosków oraz podsumowaniem projektu.
+
+## Literatura
+
+- Hyndman, R.J., Athanasopoulos, G., Forecasting: principles and practice, 2nd edition, 2018, https:
+//otexts.com/fpp2/, rozdział 10.
+
+- Hyndman, R. J., Ahmed, R. A., Athanasopoulos, G., & Shang, H. L. (2011). Optimal combi-
+nation forecasts for hierarchical time series. Computational Statistics and Data Analysis, 55(9),
+2579–2589.https://robjhyndman.com/publications/hierarchical/
+
+## Planowane zastosowane narzędzia
+
+- R for Explanatory Data Analysis and Model Building and Evaluation and buildin raports
+
+Brane pod uwagę:
+
+- Python jako wygodne zastępstwo dla języka R
+- Przetwarzanie chmurowe: zastosowanie narzędzi AWS lub Azure do badania i walidacji modeli, aby móc przeprowadzić cięższe obliczenia
+- PowerPoint - prezentacje
