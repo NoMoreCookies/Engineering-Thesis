@@ -30,12 +30,19 @@ knitr::opts_chunk$set(echo = TRUE)
 
 ## Literatura
 
-- Hyndman, R.J., Athanasopoulos, G., Forecasting: principles and practice, 2nd edition, 2018, https:
-//otexts.com/fpp2/, rozdział 10.
+- Hyndman, R.J., Athanasopoulos, G., Forecasting: principles and practice, 2nd edition, 2018, https://otexts.com/fpp2/, rozdział 10.
+
+W pracy Hyndmana R.J. i Athanasopoulosa G. autorzy przedstawili metody prognozowania hierarchicznych i grupowanych szeregów czasowych. Omówili podejścia takie jak bottom-up, top-down oraz middle-out, a także metody uzgadniania prognoz. W zakresie przygotowania danych i inżynierii cech przedstawiono organizację szeregów czasowych według poziomów agregacji, np. kategorii produktów lub regionów geograficznych. W procesie modelowania uwzględniono zależności między poszczególnymi poziomami hierarchii. Istotnym zagadnieniem jest ocena jakości prognoz i ich spójności, czyli zapewnienie, aby prognozy na niższych poziomach sumowały się do prognoz na poziomach wyższych. Głównym wnioskiem jest to, że uwzględnienie struktury hierarchicznej pozwala uzyskać prognozy zgodne z zależnościami występującymi w danych.
 
 - Hyndman, R. J., Ahmed, R. A., Athanasopoulos, G., & Shang, H. L. (2011). Optimal combi-
 nation forecasts for hierarchical time series. Computational Statistics and Data Analysis, 55(9),
-2579–2589.https://robjhyndman.com/publications/hierarchical/
+2579–2589. https://robjhyndman.com/publications/hierarchical/
+
+W pracy Hyndmana R.J., Ahmeda R.A., Athanasopoulosa G. i Shanga H.L. autorzy zaproponowali metodę optymalnego łączenia prognoz dla hierarchicznych szeregów czasowych. Porównali ją z klasycznymi podejściami bottom-up oraz top-down. W ramach przygotowania danych wykorzystano hierarchiczną strukturę szeregów czasowych, uwzględniając różne poziomy agregacji. Proces modelowania prognostycznego polegał na niezależnym wyznaczaniu prognoz dla wszystkich poziomów hierarchii, a następnie ich uzgadnianiu za pomocą modelu regresyjnego. Do testowania i oceny jakości modeli wykorzystano badanie symulacyjne oraz rzeczywiste dane dotyczące ruchu turystycznego w Australii, z podziałem na regiony geograficzne i cele podróży. Wyniki wskazały, że zaproponowana metoda może zapewniać lepszą jakość prognoz niż tradycyjne podejścia bottom-up i top-down. Ważnym wnioskiem jest możliwość uzyskania spójnych i nieobciążonych prognoz o minimalnej wariancji, przy spełnieniu określonych założeń.
+
+- Makridakis, S., Spiliotis, E., & Assimakopoulos, V. (2022). M5 accuracy competition: Results, findings, and conclusions. International Journal of Forecasting. https://doi.org/10.1016/j.ijforecast.2021.11.013
+
+W pracy Makridakisa S., Petropoulosa F. i Spiliotisa E. autorzy przedstawili najważniejsze wyniki i wnioski z konkursu prognostycznego M5, porównując metody statystyczne oraz modele uczenia maszynowego, w tym LightGBM i sieci neuronowe. W analizie wykorzystano rzeczywiste dane dotyczące dziennej sprzedaży produktów w sieci Walmart, zorganizowane w hierarchiczne szeregi czasowe. W zakresie przygotowania danych i inżynierii cech zwrócono uwagę na wykorzystanie dodatkowych informacji oraz odpowiednie przetwarzanie szeregów o nieregularnej sprzedaży. Modelowanie i ocenę jakości prognoz przeprowadzono z uwzględnieniem różnych poziomów hierarchii, porównując dokładność metod oraz jakość szacowania niepewności. Najlepsze modele uczenia maszynowego osiągały wyższą dokładność niż tradycyjne metody statystyczne. W konkursie dotyczącym dokładności prognoz najlepsza metoda ML uzyskała wynik o 22,4% lepszy od najlepszego statystycznego modelu bazowego. Przewaga ta była jednak zależna od poziomu hierarchii - wynosiła około 53% na najwyższym poziomie i zaledwie 3% na najniższym. Istotnym wnioskiem jest to, że bardziej złożone modele nie zawsze zapewniają znacząco lepsze prognozy, a ich skuteczność zależy od charakterystyki danych i poziomu agregacji. Autorzy podkreślili również znaczenie porównywania zaawansowanych modeli z prostymi metodami bazowymi.
 
 ## Planowane zastosowane narzędzia
 
