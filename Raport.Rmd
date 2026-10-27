@@ -1,0 +1,1412 @@
+---
+title: "Raport_inżynierski"
+author: "Kacper Szmigielski"
+date: "2026-10-27"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r test}
+# ============================================================
+# 1. Pakiety
+# ============================================================
+
+# Uruchom tylko raz:
+# install.packages(c("tidyverse", "jsonlite"))
+
+library(tidyverse)
+library(jsonlite)
+
+# ============================================================
+# 2. Pobranie danych miesięcznych z Treasury — tabela 9
+# ============================================================
+
+adres <- paste0(
+  "https://api.fiscaldata.treasury.gov/services/api/",
+  "fiscal_service/v1/accounting/mts/mts_table_9",
+  "?page%5Bsize%5D=10000&sort=record_date"
+)
+
+odpowiedz <- fromJSON(adres)
+
+# Zabezpieczenie przed pobraniem tylko części danych
+if (as.integer(odpowiedz$meta[["total-pages"]]) > 1) {
+  stop("API zwróciło więcej niż jedną stronę danych.")
+}
+
+surowe <- as_tibble(odpowiedz$data)
+
+# Używamy kodów pozycji, bo nazwa 'Total' występuje
+# osobno dla dochodów i wydatków.
+mapa <- tribble(
+  ~kod,  ~kategoria,
+  "20",  "Podatki od osób fizycznych",
+  "30",  "Podatki od przedsiębiorstw",
+  "50",  "Ubezpieczenia i emerytury",
+  "60",  "Ubezpieczenia i emerytury",
+  "70",  "Ubezpieczenia i emerytury",
+  "80",  "Akcyza",
+  "90",  "Podatki od spadków i darowizn",
+  "100", "Cła",
+  "110", "Pozostałe dochody",
+  "120", "Ogółem"
+)
+
+dane <- surowe |>
+  transmute(
+    # Wszystkie daty sprowadzamy do pierwszego dnia miesiąca
+    data = as.Date(paste0(substr(record_date, 1, 7), "-01")),
+    kod = as.character(line_code_nbr),
+    # API zwraca kwoty w USD, nie w mln USD
+    usd = as.numeric(na_if(current_month_rcpt_outly_amt, "null"))
+  ) |>
+  inner_join(mapa, by = "kod")
+
+# ============================================================
+# 3. Kontrola kompletności danych
+# ============================================================
+
+oczekiwane <- expand_grid(
+  data = seq(min(dane$data), max(dane$data), by = "month"),
+  kod = mapa$kod
+)
+
+braki <- anti_join(oczekiwane, dane, by = c("data", "kod"))
+
+duplikaty <- dane |>
+  count(data, kod) |>
+  filter(n != 1)
+
+if (nrow(braki) > 0 ||
+    nrow(duplikaty) > 0 ||
+    anyNA(dane$usd)) {
+  stop("W danych są braki lub duplikaty — sprawdź je przed analizą.")
+}
+
+# Łączymy trzy składniki ubezpieczeniowe
+szeregi <- dane |>
+  group_by(data, kategoria) |>
+  summarise(usd = sum(usd), .groups = "drop") |>
+  mutate(mld_usd = usd / 1e9)
+
+skladniki <- szeregi |>
+  filter(kategoria != "Ogółem")
+
+ogolem <- szeregi |>
+  filter(kategoria == "Ogółem")
+
+# ============================================================
+# 4. Sprawdzenie hierarchii: czy składniki dają sumę?
+# ============================================================
+
+kontrola <- skladniki |>
+  group_by(data) |>
+  summarise(suma_skladnikow = sum(usd), .groups = "drop") |>
+  left_join(
+    ogolem |> select(data, suma_opublikowana = usd),
+    by = "data"
+  ) |>
+  mutate(roznica_usd = suma_opublikowana - suma_skladnikow)
+
+print(
+  kontrola |>
+    summarise(
+      liczba_miesiecy = n(),
+      poczatek = min(data),
+      koniec = max(data),
+      maks_roznica_usd = max(abs(roznica_usd))
+    )
+)
+
+if (any(abs(kontrola$roznica_usd) > 1)) {
+  warning("Różnica sumowania przekracza 1 USD. Sprawdź kategorie.")
+}
+
+# ============================================================
+# 5. Wykres dochodów ogółem
+# ============================================================
+
+p1 <- ggplot(ogolem, aes(data, mld_usd)) +
+  geom_line(color = "#176B87", linewidth = 0.7) +
+  labs(
+    title = "Miesięczne dochody budżetu USA",
+    x = NULL,
+    y = "Mld USD"
+  ) +
+  theme_minimal()
+
+print(p1)
+
+# ============================================================
+# 6. Wykres każdej kategorii osobno
+# ============================================================
+
+p2 <- ggplot(skladniki, aes(data, mld_usd)) +
+  geom_line(color = "#176B87", linewidth = 0.5) +
+  facet_wrap(~ kategoria, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Dochody według źródła",
+    subtitle = "Uwaga: każdy panel ma własną skalę osi Y",
+    x = NULL,
+    y = "Mld USD"
+  ) +
+  theme_minimal()
+
+print(p2)
+
+# ============================================================
+# 7. Sezonowość — rozkład wpływów w miesiącach roku
+# ============================================================
+
+sezonowosc <- skladniki |>
+  mutate(
+    miesiac = factor(
+      format(data, "%m"),
+      levels = sprintf("%02d", 1:12),
+      labels = c(
+        "Sty", "Lut", "Mar", "Kwi", "Maj", "Cze",
+        "Lip", "Sie", "Wrz", "Paź", "Lis", "Gru"
+      )
+    )
+  )
+
+p3 <- ggplot(sezonowosc, aes(miesiac, mld_usd)) +
+  geom_boxplot(fill = "#B9E5E8", outlier.alpha = 0.4) +
+  facet_wrap(~ kategoria, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Wpływy według miesiąca kalendarzowego",
+    subtitle = "Każde pudełko zbiera obserwacje z różnych lat",
+    x = NULL,
+    y = "Mld USD"
+  ) +
+  theme_minimal()
+
+print(p3)
+
+# ============================================================
+# 8. Udziały kategorii — tylko pełne lata kalendarzowe
+# ============================================================
+
+roczne <- skladniki |>
+  mutate(rok = as.integer(format(data, "%Y"))) |>
+  group_by(rok, kategoria) |>
+  summarise(
+    liczba_miesiecy = n(),
+    usd = sum(usd),
+    .groups = "drop"
+  ) |>
+  group_by(rok) |>
+  filter(all(liczba_miesiecy == 12)) |>
+  mutate(udzial = usd / sum(usd)) |>
+  ungroup()
+
+p4 <- ggplot(roczne, aes(factor(rok), udzial, fill = kategoria)) +
+  geom_col() +
+  scale_y_continuous(labels = scales::label_percent()) +
+  labs(
+    title = "Struktura dochodów w pełnych latach kalendarzowych",
+    x = "Rok",
+    y = "Udział w dochodach",
+    fill = "Kategoria"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(ncol = 2))
+
+print(p4)
+
+```
+```{r dsaf}
+
+# ============================================================
+# 1. Pakiety i ustawienia
+# ============================================================
+
+# Uruchom tylko raz:
+# install.packages("forecast")
+
+library(forecast)
+library(tidyverse)
+
+# Liczba miesięcy pozostawionych do oceny
+h <- 24
+
+# Listy na wyniki każdej kategorii
+lista_prognoz <- list()
+lista_bledow <- list()
+lista_specyfikacji <- list()
+modele <- list()
+
+# ============================================================
+# 2. Dopasowanie modeli osobno dla każdej kategorii
+# ============================================================
+
+for (kat in unique(skladniki$kategoria)) {
+
+  message("Analizuję: ", kat)
+
+  df <- skladniki |>
+    filter(kategoria == kat) |>
+    arrange(data)
+
+  # Kontrola danych: pełna, regularna seria miesięczna
+  oczekiwane_daty <- seq(
+    min(df$data), max(df$data), by = "month"
+  )
+
+  if (
+    nrow(df) != length(oczekiwane_daty) ||
+    anyDuplicated(df$data) > 0 ||
+    !all(df$data == oczekiwane_daty) ||
+    any(!is.finite(df$mld_usd)) ||
+    nrow(df) < h + 36
+  ) {
+    stop("Sprawdź kompletność i długość szeregu: ", kat)
+  }
+
+  # Podział chronologiczny
+  n_train <- nrow(df) - h
+
+  train <- df[seq_len(n_train), ]
+  test <- df[(n_train + 1):nrow(df), ]
+
+  # Szereg miesięczny: sezonowość co 12 obserwacji
+  y_train <- ts(
+    train$mld_usd,
+    start = c(
+      as.integer(format(train$data[1], "%Y")),
+      as.integer(format(train$data[1], "%m"))
+    ),
+    frequency = 12
+  )
+
+  # ETS: automatyczny wybór wariantu addytywnego
+  model_ets <- forecast::ets(
+    y_train,
+    model = "ZZZ",
+    additive.only = TRUE
+  )
+
+  # ARIMA: dopuszczamy składniki sezonowe.
+  # stepwise = TRUE przyspiesza pierwszy eksperyment.
+  model_arima <- forecast::auto.arima(
+    y_train,
+    seasonal = TRUE,
+    stepwise = TRUE,
+    approximation = FALSE,
+    ic = "aicc"
+  )
+
+  # Zachowujemy modele do późniejszej diagnostyki
+  modele[[kat]] <- list(
+    ETS = model_ets,
+    ARIMA = model_arima
+  )
+
+  lista_specyfikacji[[kat]] <- tibble(
+    kategoria = kat,
+    ETS = model_ets$method,
+    ARIMA = forecast::arimaorder(model_arima) |>
+      paste(collapse = ", ")
+  )
+
+  # Prognozy na dokładnie te same miesiące
+  prognozy_kategorii <- list(
+    "Naiwna" = forecast::naive(y_train, h = h),
+    "Sezonowo naiwna" = forecast::snaive(y_train, h = h),
+    "ETS" = forecast::forecast(model_ets, h = h),
+    "ARIMA" = forecast::forecast(model_arima, h = h)
+  )
+
+  tabela_prognoz <- purrr::imap_dfr(
+    prognozy_kategorii,
+    function(prognoza, nazwa) {
+      tibble(
+        kategoria = kat,
+        data = test$data,
+        horyzont = seq_len(h),
+        model = nazwa,
+        rzeczywiste = test$mld_usd,
+        prognoza = as.numeric(prognoza$mean)
+      )
+    }
+  )
+
+  # Skala MASE: średni bezwzględny błąd sezonowo naiwny
+  # wyliczony WYŁĄCZNIE na zbiorze treningowym.
+  skala_mase <- mean(
+    abs(diff(as.numeric(y_train), lag = 12))
+  )
+
+  tabela_bledow <- tabela_prognoz |>
+    group_by(kategoria, model) |>
+    summarise(
+      MAE = mean(abs(rzeczywiste - prognoza)),
+      RMSE = sqrt(mean((rzeczywiste - prognoza)^2)),
+      .groups = "drop"
+    ) |>
+    mutate(
+      MASE = if (skala_mase > 0) MAE / skala_mase else NA_real_
+    )
+
+  lista_prognoz[[kat]] <- tabela_prognoz
+  lista_bledow[[kat]] <- tabela_bledow
+}
+
+prognozy <- bind_rows(lista_prognoz)
+bledy <- bind_rows(lista_bledow)
+specyfikacje <- bind_rows(lista_specyfikacji)
+
+# ============================================================
+# 3. Tabela błędów — im mniej, tym lepiej
+# ============================================================
+
+bledy |>
+  arrange(kategoria, RMSE) |>
+  mutate(across(c(MAE, RMSE, MASE), ~ round(.x, 3))) |>
+  print(n = Inf)
+
+# ============================================================
+# 4. Najlepsza metoda w każdej kategorii według RMSE
+# ============================================================
+
+najlepsze <- bledy |>
+  group_by(kategoria) |>
+  slice_min(RMSE, n = 1, with_ties = TRUE) |>
+  ungroup()
+
+print(najlepsze, n = Inf)
+
+# ============================================================
+# 5. Porównanie prognoz z rzeczywistością
+#    Pokazujemy tylko okres testowy.
+# ============================================================
+
+rzeczywiste_test <- prognozy |>
+  distinct(kategoria, data, rzeczywiste)
+
+p_prognozy <- ggplot() +
+  geom_line(
+    data = prognozy,
+    aes(data, prognoza, color = model),
+    linewidth = 0.65
+  ) +
+  geom_line(
+    data = rzeczywiste_test,
+    aes(data, rzeczywiste),
+    color = "black",
+    linewidth = 0.8
+  ) +
+  facet_wrap(~ kategoria, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Prognozy dla poszczególnych źródeł dochodów",
+    subtitle = paste(
+      "Czarna linia: rzeczywistość.",
+      "Prognozy wykonane przed początkiem okresu testowego."
+    ),
+    x = NULL,
+    y = "Mld USD",
+    color = "Metoda"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_prognozy)
+
+# ============================================================
+# 6. Wykres błędów RMSE
+# ============================================================
+
+p_bledy <- ggplot(bledy, aes(model, RMSE, fill = model)) +
+  geom_col() +
+  facet_wrap(~ kategoria, scales = "free_y", ncol = 2) +
+  labs(
+    title = "Porównanie błędów prognoz",
+    subtitle = "Niższy słupek oznacza mniejszy RMSE",
+    x = NULL,
+    y = "RMSE [mld USD]"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 30, hjust = 1)
+  )
+
+print(p_bledy)
+
+# ============================================================
+# 7. Jakie modele zostały wybrane?
+# ============================================================
+
+# W kolumnie ARIMA kolejność:
+# p, d, q, P, D, Q, okres sezonowości
+# Dla modelu bez sezonowości mogą być tylko p, d, q.
+print(specyfikacje, n = Inf)
+
+# Szczegółowy opis wybranego modelu:
+summary(modele[["Podatki od osób fizycznych"]]$ARIMA)
+
+# Opcjonalnie: diagnostyka reszt
+# forecast::checkresiduals(
+#   modele[["Podatki od osób fizycznych"]]$ARIMA
+# )
+
+```
+
+Wstępne porównanie błędów RMSE pokazuje, że żadna z analizowanych metod nie jest najlepsza dla wszystkich źródeł dochodów. ARIMA uzyskała najniższy błąd dla akcyzy i podatków od osób fizycznych, natomiast ETS najlepiej wypadł dla podatków od przedsiębiorstw. W przypadku pozostałych dochodów oraz wpływów z ubezpieczeń i emerytur najskuteczniejsza była metoda sezonowo naiwna. Oznacza to, że bardziej złożony model nie zawsze zapewnia trafniejsze prognozy. Dla ceł wyniki wszystkich metod były zbliżone.
+
+Wyniki dotyczą jednego podziału danych i prognoz na 24 miesiące naprzód, dlatego mają charakter wstępny. W dalszej analizie należy sprawdzić ich stabilność dla różnych momentów rozpoczęcia prognozy i krótszych horyzontów. Przeprowadzone porównanie stanowi punkt odniesienia do oceny, czy wykorzystanie hierarchii i uzgadnianie prognoz pozwoli zmniejszyć błędy.
+
+```{r fsd}
+
+# ============================================================
+# 1. Bottom-up: sumowanie prognoz siedmiu kategorii
+# ============================================================
+
+# Sprawdzamy, czy każda metoda ma dokładnie jedną prognozę
+# dla każdej kategorii w każdym miesiącu.
+liczba_kategorii <- n_distinct(skladniki$kategoria)
+
+kontrola_bu <- prognozy |>
+  group_by(model, data) |>
+  summarise(
+    liczba_wierszy = n(),
+    liczba_kategorii_obecnych = n_distinct(kategoria),
+    .groups = "drop"
+  )
+
+stopifnot(
+  all(kontrola_bu$liczba_wierszy == liczba_kategorii),
+  all(kontrolrola <- kontrola_bu$liczba_kategorii_obecnych ==
+        liczba_kategorii),
+  all(is.finite(prognozy$prognoza))
+)
+
+bottom_up <- prognozy |>
+  group_by(model, data) |>
+  summarise(
+    prognoza = sum(prognoza),
+    .groups = "drop"
+  ) |>
+  mutate(podejscie = "Bottom-up")
+
+# ============================================================
+# 2. Ten sam podział danych dla dochodów ogółem
+# ============================================================
+
+daty_testowe <- sort(unique(prognozy$data))
+h_bu <- length(daty_testowe)
+
+dane_ogolem <- ogolem |>
+  arrange(data)
+
+train_ogolem <- dane_ogolem |>
+  filter(data < min(daty_testowe))
+
+test_ogolem <- dane_ogolem |>
+  filter(data %in% daty_testowe)
+
+# Sprawdzamy zgodność dat i kompletność danych
+stopifnot(
+  nrow(test_ogolem) == h_bu,
+  identical(test_ogolem$data, daty_testowe),
+  anyDuplicated(dane_ogolem$data) == 0,
+  all(is.finite(dane_ogolem$mld_usd))
+)
+
+y_ogolem <- ts(
+  train_ogolem$mld_usd,
+  start = c(
+    as.integer(format(train_ogolem$data[1], "%Y")),
+    as.integer(format(train_ogolem$data[1], "%m"))
+  ),
+  frequency = 12
+)
+
+# ============================================================
+# 3. Modele dopasowane bezpośrednio do dochodów ogółem
+# ============================================================
+
+ets_ogolem <- forecast::ets(
+  y_ogolem,
+  model = "ZZZ",
+  additive.only = TRUE
+)
+
+arima_ogolem <- forecast::auto.arima(
+  y_ogolem,
+  seasonal = TRUE,
+  stepwise = TRUE,
+  approximation = FALSE,
+  ic = "aicc"
+)
+
+prognozy_bezposrednie <- list(
+  "Naiwna" = forecast::naive(y_ogolem, h = h_bu),
+  "Sezonowo naiwna" = forecast::snaive(y_ogolem, h = h_bu),
+  "ETS" = forecast::forecast(ets_ogolem, h = h_bu),
+  "ARIMA" = forecast::forecast(arima_ogolem, h = h_bu)
+)
+
+bezposrednie <- purrr::imap_dfr(
+  prognozy_bezposrednie,
+  function(fc, nazwa) {
+    tibble(
+      model = nazwa,
+      data = daty_testowe,
+      prognoza = as.numeric(fc$mean),
+      podejscie = "Bezpośrednie"
+    )
+  }
+)
+
+# ============================================================
+# 4. Połączenie prognoz z rzeczywistymi wartościami
+# ============================================================
+
+porownanie_bu <- bind_rows(bottom_up, bezposrednie) |>
+  left_join(
+    test_ogolem |>
+      select(data, rzeczywiste = mld_usd),
+    by = "data"
+  ) |>
+  mutate(blad = rzeczywiste - prognoza)
+
+stopifnot(
+  all(is.finite(porownanie_bu$prognoza)),
+  all(is.finite(porownanie_bu$rzeczywiste))
+)
+
+# ============================================================
+# 5. MAE i RMSE dla dochodów ogółem
+# ============================================================
+
+bledy_bu <- porownanie_bu |>
+  group_by(model, podejscie) |>
+  summarise(
+    MAE = mean(abs(blad)),
+    RMSE = sqrt(mean(blad^2)),
+    .groups = "drop"
+  )
+
+bledy_bu |>
+  arrange(model, RMSE) |>
+  mutate(across(c(MAE, RMSE), ~ round(.x, 3))) |>
+  print(n = Inf)
+
+# ============================================================
+# 6. O ile procent bottom-up zmniejszył RMSE?
+# ============================================================
+
+poprawa_bu <- bledy_bu |>
+  select(model, podejscie, RMSE) |>
+  pivot_wider(
+    names_from = podejscie,
+    values_from = RMSE
+  ) |>
+  transmute(
+    model,
+    RMSE_bezposrednie = .data[["Bezpośrednie"]],
+    RMSE_bottom_up = .data[["Bottom-up"]],
+    poprawa_proc = if_else(
+      RMSE_bezposrednie > 0,
+      100 * (1 - RMSE_bottom_up / RMSE_bezposrednie),
+      NA_real_
+    )
+  )
+
+poprawa_bu |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  print(n = Inf)
+
+# ============================================================
+# 7. Kontrola: metody naiwne powinny dać te same prognozy
+# ============================================================
+
+kontrola_naiwna <- porownanie_bu |>
+  filter(model %in% c("Naiwna", "Sezonowo naiwna")) |>
+  select(model, data, podejscie, prognoza) |>
+  pivot_wider(
+    names_from = podejscie,
+    values_from = prognoza
+  ) |>
+  group_by(model) |>
+  summarise(
+    maks_roznica_mld = max(
+      abs(.data[["Bottom-up"]] - .data[["Bezpośrednie"]])
+    ),
+    .groups = "drop"
+  )
+
+print(kontrola_naiwna)
+
+if (any(kontrola_naiwna$maks_roznica_mld > 1e-6)) {
+  warning("Metody naiwne różnią się: sprawdź daty i sumowanie danych.")
+}
+
+# ============================================================
+# 8. Wykres prognoz — osobny panel dla każdej metody
+# ============================================================
+
+# Powielamy rzeczywistość, żeby pokazać ją w każdym panelu
+rzeczywiste_bu <- tidyr::crossing(
+  test_ogolem |>
+    select(data, rzeczywiste = mld_usd),
+  model = unique(porownanie_bu$model)
+)
+
+p_bu <- ggplot() +
+  geom_line(
+    data = rzeczywiste_bu,
+    aes(data, rzeczywiste, color = "Rzeczywiste"),
+    linewidth = 0.8
+  ) +
+  geom_line(
+    data = porownanie_bu,
+    aes(
+      data, prognoza,
+      color = podejscie,
+      linetype = podejscie
+    ),
+    linewidth = 0.7
+  ) +
+  facet_wrap(~ model, ncol = 2) +
+  scale_color_manual(
+    values = c(
+      "Rzeczywiste" = "black",
+      "Bezpośrednie" = "#0072B2",
+      "Bottom-up" = "#D55E00"
+    )
+  ) +
+  scale_linetype_manual(
+    values = c(
+      "Bezpośrednie" = "solid",
+      "Bottom-up" = "dashed"
+    )
+  ) +
+  labs(
+    title = "Dochody ogółem: prognoza bezpośrednia a bottom-up",
+    subtitle = "Ocena na tym samym okresie testowym",
+    x = NULL,
+    y = "Mld USD",
+    color = NULL,
+    linetype = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_bu)
+
+# ============================================================
+# 9. Wykres porównujący RMSE
+# ============================================================
+
+p_rmse_bu <- ggplot(
+  bledy_bu,
+  aes(model, RMSE, fill = podejscie)
+) +
+  geom_col(position = "dodge") +
+  scale_fill_manual(
+    values = c(
+      "Bezpośrednie" = "#0072B2",
+      "Bottom-up" = "#D55E00"
+    )
+  ) +
+  labs(
+    title = "Błąd prognozy dochodów ogółem",
+    subtitle = "Niższy słupek oznacza mniejszy RMSE",
+    x = NULL,
+    y = "RMSE [mld USD]",
+    fill = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_rmse_bu)
+
+```
+Porównanie prognoz dochodów ogółem wykazało, że korzyści z zastosowania podejścia bottom-up zależą od metody bazowej. W przypadku ETS sumowanie prognoz poszczególnych kategorii pozwoliło zmniejszyć RMSE, natomiast dla ARIMA spowodowało niewielki wzrost błędu. Najniższy RMSE uzyskano dla modelu ARIMA dopasowanego bezpośrednio do dochodów ogółem. Metody naiwna i sezonowo naiwna dały jednakowe wyniki w obu podejściach, co jest zgodne z ich konstrukcją i addytywnością danych.
+
+Wyniki wskazują, że wykorzystanie szczegółowych danych o składnikach dochodów nie gwarantuje poprawy trafności prognozy ich sumy. Wnioski dotyczą jednak jednego okresu testowego i wymagają sprawdzenia dla różnych momentów rozpoczęcia prognozowania oraz horyzontów.
+
+```{r top-down}
+# ============================================================
+# 1. Dane treningowe do wyznaczenia udziałów
+# ============================================================
+
+library(tidyverse)
+
+# Daty tego samego testu co we wcześniejszych eksperymentach
+daty_td <- sort(unique(bezposrednie$data))
+poczatek_testu <- min(daty_td)
+
+trening_td <- skladniki |>
+  filter(data < poczatek_testu) |>
+  mutate(miesiac = as.integer(format(data, "%m")))
+
+stopifnot(
+  nrow(trening_td) > 0,
+  all(is.finite(trening_td$mld_usd))
+)
+
+# ============================================================
+# 2. Stałe udziały historyczne
+#    Udział = suma dochodów kategorii / suma wszystkich kategorii
+# ============================================================
+
+udzialy_stale <- trening_td |>
+  group_by(kategoria) |>
+  summarise(
+    suma_kategorii = sum(mld_usd),
+    .groups = "drop"
+  )
+
+mianownik <- sum(udzialy_stale$suma_kategorii)
+
+if (abs(mianownik) < 1e-10) {
+  stop("Nie można wyznaczyć udziałów: suma dochodów jest zerowa.")
+}
+
+udzialy_stale <- udzialy_stale |>
+  mutate(udzial = suma_kategorii / mianownik) |>
+  select(kategoria, udzial)
+
+print(udzialy_stale)
+
+# ============================================================
+# 3. Udziały zależne od miesiąca kalendarzowego
+#    Np. udziały dla kwietnia liczymy tylko z kwietni treningu.
+# ============================================================
+
+udzialy_miesieczne <- trening_td |>
+  group_by(miesiac, kategoria) |>
+  summarise(
+    suma_kategorii = sum(mld_usd),
+    .groups = "drop"
+  ) |>
+  group_by(miesiac) |>
+  mutate(suma_miesiaca = sum(suma_kategorii)) |>
+  ungroup()
+
+if (
+  n_distinct(udzialy_miesieczne$miesiac) != 12 ||
+  any(abs(udzialy_miesieczne$suma_miesiaca) < 1e-10)
+) {
+  stop("Nie można wyznaczyć udziałów dla wszystkich 12 miesięcy.")
+}
+
+udzialy_miesieczne <- udzialy_miesieczne |>
+  mutate(udzial = suma_kategorii / suma_miesiaca) |>
+  select(miesiac, kategoria, udzial)
+
+# Dochody są netto: ewentualne ujemne udziały sygnalizujemy,
+# ale nie zerujemy ich, bo zmieniłoby to konstrukcję podziału.
+if (
+  any(udzialy_stale$udzial < 0) ||
+  any(udzialy_miesieczne$udzial < 0)
+) {
+  warning("Występują ujemne udziały. Sprawdź kategorie dochodów netto.")
+}
+
+# Kontrola sum udziałów
+stopifnot(
+  abs(sum(udzialy_stale$udzial) - 1) < 1e-10
+)
+
+kontrola_udzialow <- udzialy_miesieczne |>
+  group_by(miesiac) |>
+  summarise(suma = sum(udzial), .groups = "drop")
+
+stopifnot(all(abs(kontrola_udzialow$suma - 1) < 1e-10))
+
+# ============================================================
+# 4. Prognozy ogółem, które będziemy rozdzielać
+# ============================================================
+
+gora_td <- bezposrednie |>
+  select(model, data, prognoza_ogolem = prognoza)
+
+stopifnot(
+  anyDuplicated(gora_td[c("model", "data")]) == 0,
+  all(is.finite(gora_td$prognoza_ogolem))
+)
+
+# Tworzymy wiersz dla każdej kombinacji:
+# metoda bazowa × miesiąc testowy × kategoria
+siatka_td <- tidyr::expand_grid(
+  model = unique(gora_td$model),
+  data = daty_td,
+  kategoria = sort(unique(skladniki$kategoria))
+) |>
+  left_join(gora_td, by = c("model", "data"))
+
+# ============================================================
+# 5. Top-down ze stałymi udziałami
+# ============================================================
+
+td_staly <- siatka_td |>
+  left_join(udzialy_stale, by = "kategoria") |>
+  mutate(
+    prognoza = udzial * prognoza_ogolem,
+    podejscie = "TD stały"
+  ) |>
+  select(model, data, kategoria, podejscie, prognoza)
+
+# ============================================================
+# 6. Top-down z udziałami miesięcznymi
+# ============================================================
+
+td_miesieczny <- siatka_td |>
+  mutate(miesiac = as.integer(format(data, "%m"))) |>
+  left_join(
+    udzialy_miesieczne,
+    by = c("miesiac", "kategoria")
+  ) |>
+  mutate(
+    prognoza = udzial * prognoza_ogolem,
+    podejscie = "TD miesięczny"
+  ) |>
+  select(model, data, kategoria, podejscie, prognoza)
+
+top_down <- bind_rows(td_staly, td_miesieczny)
+
+stopifnot(all(is.finite(top_down$prognoza)))
+
+# ============================================================
+# 7. Kontrola spójności:
+#    suma prognoz kategorii = prognoza ogółem
+# ============================================================
+
+kontrola_td <- top_down |>
+  group_by(model, data, podejscie) |>
+  summarise(
+    suma_prognoz = sum(prognoza),
+    .groups = "drop"
+  ) |>
+  left_join(gora_td, by = c("model", "data")) |>
+  mutate(roznica = suma_prognoz - prognoza_ogolem)
+
+kontrola_td |>
+  group_by(model, podejscie) |>
+  summarise(
+    maks_roznica_mld = max(abs(roznica)),
+    .groups = "drop"
+  ) |>
+  print(n = Inf)
+
+stopifnot(all(abs(kontrola_td$roznica) < 1e-6))
+
+# ============================================================
+# 8. Porównanie z niezależnymi prognozami kategorii
+# ============================================================
+
+niezalezne_td <- prognozy |>
+  select(model, data, kategoria, prognoza) |>
+  mutate(podejscie = "Niezależne")
+
+rzeczywiste_td <- skladniki |>
+  filter(data %in% daty_td) |>
+  select(data, kategoria, rzeczywiste = mld_usd)
+
+porownanie_td <- bind_rows(niezalezne_td, top_down) |>
+  left_join(
+    rzeczywiste_td,
+    by = c("data", "kategoria")
+  ) |>
+  mutate(blad = rzeczywiste - prognoza)
+
+stopifnot(
+  all(is.finite(porownanie_td$rzeczywiste)),
+  all(is.finite(porownanie_td$prognoza))
+)
+
+bledy_td <- porownanie_td |>
+  group_by(kategoria, model, podejscie) |>
+  summarise(
+    MAE = mean(abs(blad)),
+    RMSE = sqrt(mean(blad^2)),
+    .groups = "drop"
+  )
+
+bledy_td |>
+  arrange(kategoria, model, RMSE) |>
+  mutate(across(c(MAE, RMSE), ~ round(.x, 3))) |>
+  print(n = Inf)
+
+# ============================================================
+# 9. Procentowa poprawa RMSE względem prognoz niezależnych
+# ============================================================
+
+punkt_odniesienia <- bledy_td |>
+  filter(podejscie == "Niezależne") |>
+  select(kategoria, model, RMSE_niezalezne = RMSE)
+
+poprawa_td <- bledy_td |>
+  filter(podejscie != "Niezależne") |>
+  left_join(punkt_odniesienia, by = c("kategoria", "model")) |>
+  mutate(
+    poprawa_proc = if_else(
+      RMSE_niezalezne > 0,
+      100 * (1 - RMSE / RMSE_niezalezne),
+      NA_real_
+    )
+  )
+
+poprawa_td |>
+  select(kategoria, model, podejscie, poprawa_proc) |>
+  mutate(poprawa_proc = round(poprawa_proc, 2)) |>
+  print(n = Inf)
+
+# ============================================================
+# 10. Wykres błędów
+#     Zmień nazwę, aby obejrzeć inną metodę bazową.
+# ============================================================
+
+wybrany_model <- "ARIMA"
+# Inne możliwości: "ETS", "Naiwna", "Sezonowo naiwna"
+
+kolory_td <- c(
+  "Niezależne" = "#0072B2",
+  "TD stały" = "#D55E00",
+  "TD miesięczny" = "#009E73"
+)
+
+p_bledy_td <- bledy_td |>
+  filter(model == wybrany_model) |>
+  ggplot(aes(podejscie, RMSE, fill = podejscie)) +
+  geom_col() +
+  facet_wrap(~ kategoria, scales = "free_y", ncol = 2) +
+  scale_fill_manual(values = kolory_td) +
+  labs(
+    title = paste("Prognozy niezależne a top-down:", wybrany_model),
+    subtitle = "Niższy słupek oznacza mniejszy błąd",
+    x = NULL,
+    y = "RMSE [mld USD]"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(angle = 25, hjust = 1)
+  )
+
+print(p_bledy_td)
+
+# ============================================================
+# 11. Wykres prognoz i rzeczywistych dochodów kategorii
+# ============================================================
+
+p_prognozy_td <- ggplot() +
+  geom_line(
+    data = porownanie_td |> filter(model == wybrany_model),
+    aes(data, prognoza, color = podejscie),
+    linewidth = 0.65
+  ) +
+  geom_line(
+    data = rzeczywiste_td,
+    aes(data, rzeczywiste),
+    color = "black",
+    linewidth = 0.8
+  ) +
+  facet_wrap(~ kategoria, scales = "free_y", ncol = 2) +
+  scale_color_manual(values = kolory_td) +
+  labs(
+    title = paste("Podział prognozy ogółem:", wybrany_model),
+    subtitle = "Czarna linia: rzeczywiste dochody kategorii",
+    x = NULL,
+    y = "Mld USD",
+    color = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p_prognozy_td)
+
+```
+
+Zastosowanie podejścia top-down nie przyniosło jednolitej poprawy trafności prognoz na dolnym poziomie hierarchii. Wariant z udziałami zależnymi od miesiąca uzyskał niższy RMSE niż niezależna ARIMA dla podatków od przedsiębiorstw, podatków od spadków i darowizn oraz wpływów z ubezpieczeń i emerytur. Dla akcyzy, podatków od osób fizycznych i pozostałych dochodów korzystniejsze było modelowanie każdej kategorii osobno. W przypadku ceł wyniki były zbliżone.
+
+Stałe udziały historyczne przeważnie prowadziły do większych błędów niż udziały miesięczne. Wyniki sugerują, że przy rozdzielaniu prognozy ogółem istotne jest uwzględnienie sezonowych zmian struktury dochodów. Dobra prognoza sumy nie gwarantuje jednak trafnego podziału na kategorie. Wnioski mają charakter wstępny i dotyczą badanego okresu testowego.
+
+```{r poz}
+
+# ============================================================
+# 1. Pakiety i dane
+# ============================================================
+
+# Uruchom tylko raz:
+# install.packages("corpcor")
+
+library(tidyverse)
+library(forecast)
+
+if (!requireNamespace("corpcor", quietly = TRUE)) {
+  stop("Najpierw uruchom: install.packages('corpcor')")
+}
+
+# Kod korzysta z obiektów z poprzednich etapów:
+# szeregi, skladniki, prognozy, bezposrednie, modele,
+# ets_ogolem, arima_ogolem
+
+kategorie_rec <- sort(unique(skladniki$kategoria))
+wezly_rec <- c("Ogółem", kategorie_rec)
+
+daty_rec <- sort(unique(bezposrednie$data))
+poczatek_rec <- min(daty_rec)
+
+# Prognozy bazowe: suma i kategorie prognozowane niezależnie
+bazowe_rec <- bind_rows(
+  bezposrednie |>
+    transmute(model, data, kategoria = "Ogółem", prognoza),
+  prognozy |>
+    select(model, data, kategoria, prognoza)
+) |>
+  filter(model %in% c("ARIMA", "ETS"))
+
+rzeczywiste_rec <- szeregi |>
+  filter(data %in% daty_rec) |>
+  select(data, kategoria, rzeczywiste = mld_usd)
+
+# ============================================================
+# 2. Funkcja uzgadniająca prognozy
+# ============================================================
+
+# Dla naszej hierarchii jest jeden warunek:
+# Ogółem - kategoria_1 - ... - kategoria_7 = 0.
+#
+# F: wiersze = miesiące, kolumny = szeregi.
+# W: macierz wag/kowariancji w tej samej kolejności szeregów.
+#
+# Wzór jest równoważny standardowemu uzgadnianiu
+# metodą ważonych najmniejszych kwadratów dla tej hierarchii.
+
+uzgodnij <- function(F, W) {
+
+  a <- c(1, rep(-1, ncol(F) - 1))
+
+  Wa <- as.numeric(W %*% a)
+  mianownik <- sum(a * Wa)
+
+  if (!is.finite(mianownik) || mianownik <= 0) {
+    stop("Niepoprawna macierz wag.")
+  }
+
+  niespojnosc <- as.numeric(F %*% a)
+
+  F - outer(niespojnosc, Wa / mianownik)
+}
+
+# ============================================================
+# 3. OLS, WLS i MinT dla ARIMA oraz ETS
+# ============================================================
+
+wyniki_rec_lista <- list()
+macierze_rec <- list()
+
+for (metoda in c("ARIMA", "ETS")) {
+
+  message("Uzgadnianie prognoz: ", metoda)
+
+  # Prognozy bazowe w macierzy
+  szerokie <- bazowe_rec |>
+    filter(model == metoda) |>
+    select(data, kategoria, prognoza)
+
+  if (anyDuplicated(szerokie[c("data", "kategoria")]) > 0) {
+    stop("Powtarzające się prognozy: ", metoda)
+  }
+
+  szerokie <- szerokie |>
+    pivot_wider(
+      names_from = kategoria,
+      values_from = prognoza
+    ) |>
+    arrange(data)
+
+  F <- as.matrix(szerokie[, wezly_rec])
+
+  stopifnot(
+    identical(szerokie$data, daty_rec),
+    all(is.finite(F))
+  )
+
+  # Modele dopasowane wcześniej wyłącznie na treningu
+  model_sumy <- if (metoda == "ARIMA") {
+    arima_ogolem
+  } else {
+    ets_ogolem
+  }
+
+  modele_dol <- lapply(
+    kategorie_rec,
+    function(kat) modele[[kat]][[metoda]]
+  )
+
+  modele_wszystkie <- c(list(model_sumy), modele_dol)
+  names(modele_wszystkie) <- wezly_rec
+
+  # Sprawdzenie, czy modele korzystały z właściwego treningu
+  for (kat in wezly_rec) {
+
+    oczekiwany_trening <- szeregi |>
+      filter(kategoria == kat, data < poczatek_rec) |>
+      arrange(data) |>
+      pull(mld_usd)
+
+    trening_modelu <- as.numeric(modele_wszystkie[[kat]]$x)
+
+    if (!isTRUE(all.equal(
+      trening_modelu,
+      oczekiwany_trening,
+      check.attributes = FALSE
+    ))) {
+      stop("Model ma inny trening: ", metoda, " / ", kat)
+    }
+  }
+
+  # Reszty wyrównane według czasu
+  reszty_lista <- lapply(
+    modele_wszystkie,
+    function(m) residuals(m)
+  )
+
+  E <- as.matrix(do.call(stats::ts.intersect, reszty_lista))
+  colnames(E) <- wezly_rec
+
+  # Pomijamy pierwsze 12 miesięcy, aby ograniczyć
+  # wpływ inicjalizacji modeli.
+  if (nrow(E) <= 36) {
+    stop("Za mało reszt do oszacowania macierzy wag.")
+  }
+
+  E <- E[-seq_len(12), , drop = FALSE]
+
+  # Wszystkie kowariancje liczymy na tych samych miesiącach
+  E <- E[
+    apply(E, 1, function(x) all(is.finite(x))),
+    ,
+    drop = FALSE
+  ]
+
+  stopifnot(nrow(E) >= 24)
+
+  wariancje <- apply(E, 2, var)
+
+  if (any(!is.finite(wariancje)) || any(wariancje <= 0)) {
+    stop("Zerowa lub niepoprawna wariancja reszt.")
+  }
+
+  # OLS: macierz jednostkowa
+  W_ols <- diag(length(wezly_rec))
+
+  # WLS: wariancje reszt na przekątnej
+  W_wls <- diag(wariancje)
+
+  # MinT: kowariancja ze shrinkage korelacji.
+  # lambda.var = 0 pozostawia wariancje bez shrinkage.
+  W_mint <- corpcor::cov.shrink(
+    E,
+    lambda.var = 0,
+    verbose = FALSE
+  )
+
+  macierze_rec[[metoda]] <- list(
+    OLS = W_ols,
+    WLS = W_wls,
+    MinT = W_mint
+  )
+
+  # Bottom-up: zachowujemy dół, zastępujemy sumę
+  F_bu <- F
+  F_bu[, 1] <- rowSums(F[, -1, drop = FALSE])
+
+  warianty <- list(
+    "Niezależne" = F,
+    "Bottom-up" = F_bu,
+    "OLS" = uzgodnij(F, W_ols),
+    "WLS" = uzgodnij(F, W_wls),
+    "MinT-shrink" = uzgodnij(F, W_mint)
+  )
+
+  wyniki_rec_lista[[metoda]] <- purrr::imap_dfr(
+    warianty,
+    function(M, nazwa) {
+
+      colnames(M) <- wezly_rec
+
+      as_tibble(M) |>
+        mutate(data = daty_rec) |>
+        pivot_longer(
+          cols = all_of(wezly_rec),
+          names_to = "kategoria",
+          values_to = "prognoza"
+        ) |>
+        mutate(
+          model = metoda,
+          podejscie = nazwa
+        )
+    }
+  )
+}
+
+prognozy_rec <- bind_rows(wyniki_rec_lista)
+
+# ============================================================
+# 4. Dodanie wcześniejszych wyników top-down, jeśli istnieją
+# ============================================================
+
+if (exists("top_down")) {
+
+  td_dol_rec <- top_down |>
+    filter(model %in% c("ARIMA", "ETS")) |>
+    select(model, podejscie, data, kategoria, prognoza)
+
+  # W top-down prognoza ogółem pozostaje bezpośrednia
+  td_gora_rec <- td_dol_rec |>
+    distinct(model, podejscie, data) |>
+    left_join(
+      bezposrednie |> select(model, data, prognoza),
+      by = c("model", "data")
+    ) |>
+    mutate(kategoria = "Ogółem")
+
+  prognozy_rec <- bind_rows(
+    prognozy_rec, td_dol_rec, td_gora_rec
+  )
+}
+
+# ============================================================
+# 5. Kontrola spójności
+# ============================================================
+
+kontrola_rec <- prognozy_rec |>
+  group_by(model, podejscie, data) |>
+  summarise(
+    roznica = sum(prognoza[kategoria == "Ogółem"]) -
+      sum(prognoza[kategoria != "Ogółem"]),
+    .groups = "drop"
+  ) |>
+  group_by(model, podejscie) |>
+  summarise(
+    maks_niespojnosc = max(abs(roznica)),
+    .groups = "drop"
+  )
+
+print(kontrola_rec, n = Inf)
+
+# Prognozy niezależne mogą być niespójne.
+# Wszystkie pozostałe powinny sumować się poprawnie.
+stopifnot(
+  all(
+    kontrola_rec$maks_niespojnosc[
+      kontrola_rec$podejscie != "Niezależne"
+    ] < 1e-6
+  )
+)
+
+# ============================================================
+# 6. Błędy na tym samym teście
+# ============================================================
+
+ocena_rec <- prognozy_rec |>
+  left_join(
+    rzeczywiste_rec,
+    by = c("data", "kategoria")
+  )
+
+stopifnot(
+  all(is.finite(ocena_rec$rzeczywiste)),
+  all(is.finite(ocena_rec$prognoza))
+)
+
+bledy_rec <- ocena_rec |>
+  group_by(model, podejscie, kategoria) |>
+  summarise(
+    MAE = mean(abs(rzeczywiste - prognoza)),
+    RMSE = sqrt(mean((rzeczywiste - prognoza)^2)),
+    .groups = "drop"
+  )
+
+# Zmiana RMSE względem prognoz niezależnych
+odniesienie_rec <- bledy_rec |>
+  filter(podejscie == "Niezależne") |>
+  select(model, kategoria, RMSE_bazowy = RMSE)
+
+bledy_rec <- bledy_rec |>
+  left_join(odniesienie_rec, by = c("model", "kategoria")) |>
+  mutate(
+    poprawa_proc = if_else(
+      RMSE_bazowy > 0,
+      100 * (1 - RMSE / RMSE_bazowy),
+      NA_real_
+    )
+  )
+
+# Wyniki dla dochodów ogółem
+bledy_rec |>
+  filter(kategoria == "Ogółem") |>
+  arrange(model, RMSE) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  print(n = Inf)
+
+# ============================================================
+# 7. Wykres dla wszystkich poziomów — wybierz ARIMA lub ETS
+# ============================================================
+
+wybrany_model_rec <- "ARIMA"
+
+p_rec <- bledy_rec |>
+  filter(model == wybrany_model_rec) |>
+  ggplot(aes(podejscie, RMSE, fill = podejscie)) +
+  geom_col() +
+  facet_wrap(~ kategoria, scales = "free_y", ncol = 2) +
+  labs(
+    title = paste(
+      "Porównanie metod uzgadniania —", wybrany_model_rec
+    ),
+    subtitle = "Każdy panel ma własną skalę. Niższy RMSE jest lepszy.",
+    x = NULL,
+    y = "RMSE [mld USD]"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text.x = element_text(
+      angle = 45, hjust = 1, size = 8
+    )
+  )
+
+print(p_rec)
+
+# Dokładne wyniki dla wybranego modelu
+bledy_rec |>
+  filter(model == wybrany_model_rec) |>
+  arrange(kategoria, RMSE) |>
+  select(kategoria, podejscie, MAE, RMSE, poprawa_proc) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3))) |>
+  print(n = Inf)
+```
+W analizowanym okresie testowym metody OLS, WLS i MinT nie przyniosły wyraźnej, systematycznej poprawy trafności prognoz względem niezależnych modeli ARIMA. Wyniki WLS i MinT były na ogół zbliżone do prognoz bazowych. OLS silniej zmieniał wyniki poszczególnych szeregów: ewentualnym korzyściom na poziomie sumy towarzyszyło pogorszenie prognoz niektórych kategorii, szczególnie akcyzy oraz podatków od spadków i darowizn.
+
+Uzgadnianie zapewniło jednak spójność prognoz, czyli zgodność prognozy dochodów ogółem z sumą prognoz kategorii. W przypadku WLS i MinT uzyskano ją bez dużych zmian trafności widocznych na wykresie. Wyniki wskazują zatem, że w tym eksperymencie główną korzyścią tych metod była spójność, a nie wyraźne zmniejszenie błędów.
+
+Nie oznacza to ogólnej nieskuteczności uzgadniania prognoz. Ocena dotyczy jednego okresu testowego oraz konkretnego sposobu estymacji macierzy wag na podstawie reszt treningowych. Dalsza analiza powinna sprawdzić stabilność wyników dla różnych momentów rozpoczęcia prognozowania i horyzontów.
+
+# Dane
+
+## Bottom - Up
+
+## Top - Down
+
+## Middle - Out
+
+
+## Forecast Reconciliation
+
+## OLS
+
+## WLS
+
+## MinT
