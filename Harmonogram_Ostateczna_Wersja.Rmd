@@ -33,7 +33,6 @@ Spis pisany był z redakcją sztucznej inteligencji (Gemini 4 Argon) oraz na bie
 -   **Zawartość opracowania:** Autorzy proponują odejście od metod jednopoziomowych na rzecz niezależnego wyznaczenia prognoz bazowych na wszystkich poziomach, a następnie ich uzgodnienia za pomocą regresji liniowej. W pracy udowodniono matematycznie, że metody *Bottom-Up* oraz *OLS* dają prognozy nieobciążone, podczas gdy każde podejście *Top-Down* zawsze wprowadza obciążenie statystyczne.
 -   **Przydatność i wykorzystanie w projekcie:** Zestawimy klasyczną metodę **BU** ( oraz ***TD*** i **MU** dla zbioru ściśle hierarchicznego) z podejściem regresyjnym **Optimal**-**OLS** oraz ze standardowym podejściem bazowym. Pozwoli nam to empirycznie zweryfikować tezę autorów o nieobciążoności i przewadze metod łączących informacje ze wszystkich poziomów agregacji.
 
-\newpage
 
 ### [3] Wickramasuriya, S. L., Athanasopoulos, G., & Hyndman, R. J. (2019). *Optimal forecast reconciliation for hierarchical and grouped time series through trace minimization*. Journal of the American Statistical Association (JASA), 114(526), 804-819. <https://robjhyndman.com/publications/mint/>
 
@@ -67,7 +66,6 @@ Kod autorów: <https://github.com/isct-nakatalab/hierarchical-tsf-robust-reconci
 
 Shrinkage i odporna estymacja kowariancji będą traktowane jako odrębne zagadnienia: stabilizacja estymacji macierzy nie oznacza automatycznie odporności na obserwacje odstające.
 
-\newpage
 
 ## 2. Wstępnie planowane narzędzia do użycia w projekcie
 
@@ -94,20 +92,20 @@ Brane pod uwagę:
     ### 29.10 — uporządkowanie podstaw teoretycznych i zakresu badań
 
     -   Uzupełnienie literatury o pozycje [5–6] i uwzględnienie uwag prowadzącego.
-    -   Opis ETS oraz ARIMA, obejmujący wariant niesezonowy i sezonowy.
-    -   Opis BASE, BU, TD, MO, Optimal-OLS, Optimal-WLS i Optimal-MinT.
-    -   Wyjaśnienie roli estymacji macierzy kowariancji, w tym shrinkage.
+    -   Przypomnienie informacji o modelach ETS oraz ARIMA, jak i o prognozach Naive oraz Seasonal Naive.
+    -   Wstępne zrozumienie metod łączenia prognoz hierarchicznych - BASE, BU, TD, MO, Optimal-OLS, Optimal-WLS i Optimal-MinT.
+    -   Zaznajomienie się z rolą estymacji macierzy kowariancji.
     -   Ujednolicenie oznaczeń oraz doprecyzowanie celów i pytań badawczych.
     -   Wstępne rozpoznanie dostępnych implementacji i ograniczeń ich użycia.
 
-    **Rezultat:** wstępna część teoretyczna raportu, lista badanych metod oraz narzędzi do sprawdzenia na danych.
+    **Rezultat:** Lepsze przygotowanie merytoryczne i poszerzenie wiedzy pomocnej w naszym projekcie. Teoretyczna lista badanych metod oraz narzędzi do sprawdzenia na danych.
 
     ### 02.11 — analiza kandydatów na dane i pilotaż prognozowania
 
     -   Ocena długości szeregów, częstotliwości danych, braków obserwacji, liczby szeregów i struktury agregacji.
     -   Wstępna analiza trendu, sezonowości, autokorelacji, zmienności wariancji i obserwacji odstających.
-    -   Sprawdzenie, czy struktura umożliwia porównanie wszystkich zaplanowanych metod, w szczególności TD i MO.
-    -   Pilotażowe wyznaczenie prognoz ETS i ARIMA/SARIMA oraz naiwnych punktów odniesienia na chronologicznym podziale danych.
+    -   Sprawdzenie, czy struktura umożliwia porównanie skuteczności zaplanowanych metod prognozowania hierarchicznego.
+    -   Pilotażowe wyznaczenie prognoz ETS i ARIMA oraz naiwnych punktów odniesienia na chronologicznym podziale danych.
     -   Ocena trudności prognozowania, i działania wybranych narzędzi.
     -   Wybór zbioru do planu minimum oraz zdefiniowanie jego hierarchii.
 
@@ -120,11 +118,9 @@ Brane pod uwagę:
     -   Ustalenie horyzontów prognozy odpowiednich do częstotliwości i długości danych.
     -   Zaplanowanie chronologicznego podziału na część rozwojową i końcową część testową.
     -   Zdefiniowanie rolling-origin z rozszerzającym się oknem treningowym: początkowej długości okna, kroku przesuwania i liczby punktów początkowych prognoz.
-    -   Ustalenie wariantów TD, MO, Optimal-WLS i Optimal-MinT.
     -   Przyjęcie obowiązkowych metryk MAE, RMSE, MASE i RMSSE oraz zasad ich agregowania na wszystkich poziomach hierarchii.
     -   Określenie zasad obsługi braków danych, transformacji, obserwacji odstających oraz zerowych mianowników metryk skalowanych.
-    -   Zaplanowanie pomiaru czasu dopasowania, generowania prognoz i uzgadniania.
-    -   Wybór procedury oceny istotności statystycznej dla wcześniej określonych porównań, z uwzględnieniem zależności czasowych i hierarchicznych.
+    -   Wybór procedury oceny istotności statystycznej dla wcześniej określonych porównań metod i modeli.
     -   Zaprojektowanie formatu konfiguracji, zapisu wyników i prezentacji rezultatów.
     -   Ustalenie osób odpowiedzialnych za główne obszary projektu.
 
@@ -136,7 +132,7 @@ Brane pod uwagę:
     -   Implementacja parametryzowanej procedury obejmującej przygotowanie danych, budowę hierarchii, podziały czasowe, opcjonalne transformacje, prognozy bazowe i naiwne, uzgadnianie, metryki, pomiar czasu oraz zapis wyników.
     -   Sprawdzenie zgodności dat, kolejności szeregów i struktury agregacji.
     -   Kontrola braku wykorzystania przyszłych obserwacji przy estymacji parametrów, proporcji TD i macierzy kowariancji.
-    -   Sprawdzenie, czy prognozy uzgodnione sumują się zgodnie z hierarchią, z uwzględnieniem tolerancji numerycznej.
+    -   Sprawdzenie, czy prognozy uzgodnione sumują się zgodnie z hierarchią.
     -   Wykonanie pierwszego kompletnego eksperymentu na części rozwojowej danych.
     -   Aktualizacja części metodologicznej raportu.
 
@@ -147,8 +143,7 @@ Brane pod uwagę:
     -   Przedstawienie celu projektu, pytań badawczych, danych i struktury hierarchii.
     -   Omówienie walidacji i metryk.
     -   Prezentacja pierwszych wyników według strategii, modeli, poziomów hierarchii i horyzontów.
-    -   Wstępne porównanie czasu obliczeń i omówienie problemów.
-    -   Ocena realizacji planu minimum.
+    -   Ocena realizacji planu minimum i ewentualnych występujących problemów.
     -   Wybór co najwyżej jednego głównego rozszerzenia do planu maksimum, jeżeli postęp prac i dostępny czas na to pozwalają.
 
     **Rezultat:** prezentacja wstępna i ostateczna lista eksperymentów do wykonania do 03.12.
@@ -156,10 +151,9 @@ Brane pod uwagę:
     ### 03.12 — zakończenie eksperymentów i analiza wyników
 
     -   Wykonanie pełnego zestawu eksperymentów planu minimum na końcowej części testowej według wcześniej ustalonych reguł.
-    -   Porównanie BASE, BU, TD, MO, Optimal-OLS, Optimal-WLS i Optimal-MinT z uwzględnieniem naiwnych punktów odniesienia.
-    -   Analiza wpływu modelu bazowego, horyzontu prognozy i poziomu hierarchii.
+    -   Porównanie BASE, BU, TD, MO, Optimal-OLS, Optimal-WLS i Optimal-MinT.
+    -   Analiza wpływu modelu bazowego, horyzontu prognozy i poziomu hierarchii na jakość prognóz.
     -   Ocena istotności statystycznej wcześniej zaplanowanych porównań oraz wielkości obserwowanych różnic.
-    -   Zestawienie dokładności z czasem obliczeń.
     -   Realizacja wybranego rozszerzenia, jeśli ukończono plan minimum.
     -   Sformułowanie odpowiedzi na pytania badawcze i opis ograniczeń.
     -   Uzupełnienie raportu o końcowe tabele, wykresy i interpretację.
