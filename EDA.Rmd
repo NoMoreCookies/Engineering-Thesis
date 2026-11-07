@@ -1,0 +1,340 @@
+---
+title: "ExplanatoryDataAnalysis"
+author: "Kacper Szmigielski"
+date: "2026-11-06"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      warning = FALSE,
+                      message = FALSE)
+palette <- c(
+  "#7fc97f",
+  "#beaed4",
+  "#fdc086",
+  "#984ea3",
+  "#386cb0",
+  "#f0027f",
+  "#bf5b17",
+  "#01665e",
+  "#8c510a",
+  "#4d4d4d"
+  
+)
+```
+
+```{r libraries}
+
+knitr::opts_chunk$set(dev = "cairo_pdf")
+library(tidyverse)
+library(jsonlite)
+
+```
+
+```{r data_import}
+
+adress <- paste0(
+  "https://api.fiscaldata.treasury.gov/services/api/",
+  "fiscal_service/v1/accounting/mts/mts_table_9",
+  "?page%5Bsize%5D=10000&sort=record_date"
+)
+
+answer <- fromJSON(adress)
+```
+
+```{r przygotowanie_danych}
+
+raw_data <- as_tibble(answer$data)
+
+map <- tribble(
+  ~kod, ~kategoria,
+  "20",  "Podatki od osób fizycznych",
+  "30",  "Podatki od przedsiębiorstw",
+  "50",  "Ubezpieczenia i emerytury",
+  "60",  "Ubezpieczenia i emerytury",
+  "70",  "Ubezpieczenia i emerytury",
+  "80",  "Akcyza",
+  "90",  "Podatki od spadków i darowizn",
+  "100", "Cła",
+  "110", "Pozostałe dochody",
+  "120", "Ogółem"
+)
+
+dt <- raw_data |>
+  transmute(
+    data = as.Date(paste0(substr(record_date, 1, 7), "-01")),
+    kod = as.character(line_code_nbr),
+    usd = as.numeric(na_if(current_month_rcpt_outly_amt, "null"))
+  ) |>
+  inner_join(map, by = "kod")
+```
+
+# Źródło i zakres danych
+
+Dane wykorzystane w projekcie pochodzą z tabeli 9 raportu Monthly Treasury Statement, publikowanego przez Departament Skarbu Stanów Zjednoczonych. Dane pobrano za pośrednictwem API Fiscal Data.
+
+Analiza obejmuje okres od [pierwszy miesiąc i rok] do [ostatni miesiąc i rok], łącznie [liczba miesięcy]. Zbiór zawiera osiem miesięcznych szeregów czasowych. Jeden przedstawia dochody ogółem, a pozostałe siedem obejmuje podatki od osób fizycznych, podatki od przedsiębiorstw, ubezpieczenia i emerytury, akcyzę, podatki od spadków i darowizn, cła oraz pozostałe dochody. Wartości przedstawiono w miliardach dolarów amerykańskich.
+
+\newpage
+
+## Wykres ogółem
+
+```{r dane}
+
+awaiting <- expand_grid(
+  data = seq(min(dt$data), max(dt$data), by = "month"),
+  kod = map$kod
+)
+
+braki <- anti_join(awaiting, dt, by = c("data", "kod"))
+
+duplicates <- dt |>
+  count(data, kod) |>
+  filter(n != 1)
+
+if (nrow(braki) > 0 ||
+    nrow(duplicates) > 0 ||
+    anyNA(dt$usd)) {
+  stop("W danych są braki lub duplikaty")
+}
+
+szeregi <- dt |>
+  group_by(data, kategoria) |>
+  summarise(usd = sum(usd), .groups = "drop") |>
+  mutate(mld_usd = usd / 1e9)
+
+skladniki <- szeregi |>
+  filter(kategoria != "Ogółem")
+
+ogolem <- szeregi |>
+  filter(kategoria == "Ogółem")
+
+
+# 4. Sprawdzenie hierarchii: czy składniki dają sumę?
+
+kontrola <- skladniki |>
+  group_by(data) |>
+  summarise(suma_skladnikow = sum(usd), .groups = "drop") |>
+  left_join(
+    ogolem |> select(data, suma_opublikowana = usd),
+    by = "data"
+  ) |>
+  mutate(roznica_usd = suma_opublikowana - suma_skladnikow)
+
+# print(
+#   kontrola |>
+#     summarise(
+#       liczba_miesiecy = n(),
+#       poczatek = min(data),
+#       koniec = max(data),
+#       maks_roznica_usd = max(abs(roznica_usd))
+#     )
+# )
+
+if (any(abs(kontrola$roznica_usd) > 1)) {
+  warning("Różnica sumowania przekracza 1 USD. Sprawdź kategorie.")
+}
+
+
+# 5. Wykres dochodów ogółem
+
+p1 <- ggplot(ogolem, aes(data, mld_usd)) +
+  geom_line(color = palette[5], linewidth = 0.7) +
+  labs(
+    title = "Miesięczne dochody budżetu USA",
+    x = NULL,
+    y = "Mld USD"
+  ) +
+  theme_minimal()
+
+print(p1)
+
+```
+
+Miesięczne dochody federalne USA wykazują znaczne wahania. W kolejnych latach widoczne są wyraźne szczyty wpływów, często przypadające na kwiecień. Przykładowo w kwietniu 2022 r. dochody wyniosły około 864 mld USD, a w maju spadły do 389 mld USD. Powtarzalność szczytów sugeruje występowanie sezonowości rocznej, która może być związana z terminami rozliczeń i wpłat podatkowych. W dalszej części analizy porównano rozkłady dochodów w poszczególnych miesiącach kalendarzowych.
+
+## Wykresy pojedyncze
+
+```{r pojedyncze_wykresy}
+
+p2 <- ggplot(
+  skladniki,
+  aes(x = data, y = mld_usd, colour = kategoria)
+) +
+  geom_line(linewidth = 0.6) +
+  facet_wrap(~ kategoria, ncol = 2, scales = "free_y") +
+  scale_colour_manual(values = palette, guide = "none") +
+  labs(
+    title = "Miesięczne dochody federalne USA według kategorii",
+    x = NULL,
+    y = "Mld USD"
+  ) +
+  theme_minimal()
+
+print(p2)
+
+```
+
+Najwyraźniejszy trend wzrostowy widoczny jest w kategorii „Ubezpieczenia i emerytury”. Wpływy z podatków od osób fizycznych również rosną w badanym okresie, a ich przebieg charakteryzuje się wyraźnymi, powtarzającymi się szczytami. Wpływy z podatków od przedsiębiorstw wykazują kilka szczytów w ciągu roku. Powtarzalność tych wahań w obu kategoriach podatków dochodowych sugeruje występowanie sezonowości.
+
+Wpływy z akcyzy przez większość okresu oscylują wokół podobnego poziomu, choć zdarzają się wyraźne skoki. W podatkach od spadków i darowizn wyróżnia się pojedyncza wysoka obserwacja, natomiast w pozostałych dochodach około 2023 r. widoczny jest spadek typowego poziomu wpływów. Wpływy z ceł zmieniają się stosunkowo łagodnie przez większość badanego okresu, a pod koniec szeregu widać gwałtowny wzrost, po którym pojawia się wartość ujemna. Na podstawie wykresu liniowego trudno jednoznacznie ocenić sezonowość akcyzy i ceł.
+
+# Opis planowanej  chierarchii danych.
+
+
+
+
+```{r hierarchia, echo=FALSE, fig.width=8, fig.height=5, fig.align="center"}
+
+wezly <- tibble::tibble(
+  kategoria = c(
+    "Podatki od osób fizycznych",
+    "Akcyza",
+    "Podatki od spadków i darowizn",
+    "Ubezpieczenia i emerytury",
+    "Podatki od przedsiębiorstw",
+    "Cła",
+    "Pozostałe dochody"
+  ),
+  grupa = rep(c("Grupa 1", "Grupa 2"), times = c(3, 4)),
+  y = c(8, 7, 6, 4, 3, 2, 1)
+) |>
+  mutate(etykieta = stringr::str_wrap(kategoria, width = 26))
+
+grupy <- wezly |>
+  group_by(grupa) |>
+  summarise(
+    y_min = min(y),
+    y_max = max(y),
+    y = (y_min + y_max) / 2,
+    .groups = "drop"
+  )
+
+srodek <- mean(grupy$y)
+
+ggplot() +
+  # Połączenia od „Ogółem” do dwóch grup
+  annotate(
+    "segment", x = 0.8, xend = 1.9,
+    y = srodek, yend = srodek, colour = "grey65"
+  ) +
+  annotate(
+    "segment", x = 1.9, xend = 1.9,
+    y = min(grupy$y), yend = max(grupy$y), colour = "grey65"
+  ) +
+  geom_segment(
+    data = grupy,
+    aes(x = 1.9, xend = 3.8, y = y, yend = y),
+    colour = "grey65"
+  ) +
+  # Połączenia od grup do kategorii
+  geom_segment(
+    data = grupy,
+    aes(x = 3.8, xend = 3.8, y = y_min, yend = y_max),
+    colour = "grey65"
+  ) +
+  geom_segment(
+    data = wezly,
+    aes(x = 3.8, xend = 4.3, y = y, yend = y),
+    colour = "grey65"
+  ) +
+  # Etykiety trzech poziomów
+  annotate(
+    "label", x = 0.8, y = srodek,
+    label = "Dochody\nogółem",
+    fill = "#333333", colour = "white",
+    fontface = "bold", size = 4
+  ) +
+  geom_label(
+    data = grupy,
+    aes(x = 2.8, y = y, label = grupa),
+    fill = "grey93", colour = "grey20",
+    fontface = "bold", size = 4
+  ) +
+  geom_label(
+    data = wezly,
+    aes(x = 4.3, y = y, label = etykieta, colour = kategoria),
+    hjust = 0, fill = "white", fontface = "bold", size = 3.8,
+    show.legend = FALSE
+  ) +
+  scale_colour_manual(values = palette) +
+  coord_cartesian(xlim = c(0, 7.5), ylim = c(0.5, 8.5)) +
+  labs(title = "Hierarchia miesięcznych dochodów federalnych USA") +
+  theme_void() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+```
+```{r kolejny_wyrkes}
+roczne <- skladniki |>
+  mutate(rok = as.integer(format(data, "%Y"))) |>
+  group_by(rok, kategoria) |>
+  summarise(
+    liczba_miesiecy = n_distinct(data),
+    usd = sum(usd),
+    .groups = "drop"
+  ) |>
+  group_by(rok) |>
+  filter(n() == 7, all(liczba_miesiecy == 12)) |>
+  mutate(udzial = usd / sum(usd)) |>
+  ungroup()
+# Udziały grup w dochodach w pełnych latach kalendarzowych
+roczne_grupy <- roczne |>
+  inner_join(
+    wezly |> select(kategoria, grupa),
+    by = "kategoria"
+  ) |>
+  group_by(rok, grupa) |>
+  summarise(
+    udzial = sum(udzial),
+    .groups = "drop"
+  )
+
+p5 <- ggplot(roczne_grupy, aes(x = factor(rok), y = udzial, fill = grupa)) +
+  geom_col(width = 0.75) +
+  scale_fill_manual(
+    values = c("Grupa 1" = "#176B87", "Grupa 2" = "#B65C24")
+  ) +
+  scale_y_continuous(
+    labels = scales::label_percent(),
+    breaks = seq(0, 1, by = 0.25)
+  ) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey30") +
+  labs(
+    title = "Udział grup w dochodach federalnych USA",
+    subtitle = "Pełne lata kalendarzowe",
+    x = "Rok",
+    y = "Udział w dochodach",
+    fill = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p5)
+
+```
+```{r ten_drugi_wykres}
+
+
+p4 <- ggplot(roczne, aes(x = factor(rok), y = udzial, fill = kategoria)) +
+  geom_col(width = 0.75) +
+  scale_fill_manual(values = palette) +
+  scale_y_continuous(
+    labels = scales::label_percent(),
+    breaks = seq(0, 1, by = 0.25)
+  ) +
+  labs(
+    title = "Struktura dochodów federalnych USA według kategorii",
+    subtitle = "Pełne lata kalendarzowe",
+    x = "Rok",
+    y = "Udział w dochodach",
+    fill = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(ncol = 2))
+
+print(p4)
+
+
+``` 

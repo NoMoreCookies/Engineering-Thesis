@@ -232,7 +232,7 @@ library(forecast)
 library(tidyverse)
 
 # Liczba miesięcy pozostawionych do oceny
-h <- 24
+h <- 
 
 # Listy na wyniki każdej kategorii
 lista_prognoz <- list()
