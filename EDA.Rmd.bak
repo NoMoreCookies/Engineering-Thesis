@@ -1,0 +1,922 @@
+---
+title: "ExplanatoryDataAnalysis"
+author: "Kacper Szmigielski"
+date: "2026-11-06"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      warning = FALSE,
+                      message = FALSE)
+palette <- c(
+  "#7fc97f",
+  "#beaed4",
+  "#fdc086",
+  "#984ea3",
+  "#386cb0",
+  "#f0027f",
+  "#bf5b17",
+  "#01665e",
+  "#8c510a",
+  "#4d4d4d"
+  
+)
+```
+
+```{r libraries}
+
+knitr::opts_chunk$set(dev = "cairo_pdf")
+library(tidyverse)
+library(jsonlite)
+library(knitr)
+library(tidyr)
+library(dplyr)
+```
+
+```{r data_import}
+
+adress <- paste0(
+  "https://api.fiscaldata.treasury.gov/services/api/",
+  "fiscal_service/v1/accounting/mts/mts_table_9",
+  "?page%5Bsize%5D=10000&sort=record_date"
+)
+
+answer <- fromJSON(adress)
+```
+
+```{r przygotowanie_danych}
+
+raw_data <- as_tibble(answer$data)
+
+map <- tribble(
+  ~kod, ~kategoria,
+  "20",  "Podatki od osób fizycznych",
+  "30",  "Podatki od przedsiębiorstw",
+  "50",  "Ubezpieczenia i emerytury",
+  "60",  "Ubezpieczenia i emerytury",
+  "70",  "Ubezpieczenia i emerytury",
+  "80",  "Akcyza",
+  "90",  "Podatki od spadków i darowizn",
+  "100", "Cła",
+  "110", "Pozostałe dochody",
+  "120", "Ogółem"
+)
+
+dt <- raw_data |>
+  transmute(
+    data = as.Date(paste0(substr(record_date, 1, 7), "-01")),
+    kod = as.character(line_code_nbr),
+    usd = as.numeric(na_if(current_month_rcpt_outly_amt, "null"))
+  ) |>
+  inner_join(map, by = "kod")
+```
+
+# Podstawowa charakterystyka zbioru danych
+
+Dane wykorzystane w projekcie pochodzą z tabeli 9 raportu Monthly Treasury Statement, publikowanego przez Departament Skarbu Stanów Zjednoczonych. Dane pobrano za pośrednictwem API Fiscal Data.
+
+Analiza obejmuje okres od 2015-03 do 2026-09, łącznie 139 miesięcy. Zbiór zawiera osiem miesięcznych szeregów czasowych. Jeden przedstawia dochody ogółem, a pozostałe siedem obejmuje podatki od osób fizycznych, podatki od przedsiębiorstw, ubezpieczenia i emerytury, akcyzę, podatki od spadków i darowizn, cła oraz pozostałe dochody. Wartości przedstawiono w miliardach dolarów amerykańskich.
+
+## Rozmiar i zakres czasowy
+
+```{r tab1}
+
+# 1. Pobranie wszystkich stron API
+dane <- answer$data
+
+n_stron <- as.integer(answer$meta[["total-pages"]])
+
+if (n_stron > 1) {
+  for (i in 2:n_stron) {
+    strona <- jsonlite::fromJSON(
+      paste0(adress, "&page%5Bnumber%5D=", i)
+    )
+    dane <- bind_rows(dane, strona$data)
+  }
+}
+
+# 2. Wybór kategorii analizowanych w projekcie
+kody <- c(20, 30, 50, 60, 70, 80, 90, 100, 110)
+
+pozycje <- dane |>
+  transmute(
+    data = as.Date(
+      paste0(substr(record_date, 1, 7), "-01")
+    ),
+    kod = as.integer(line_code_nbr),
+    wartosc = as.numeric(current_month_rcpt_outly_amt)
+  ) |>
+  filter(kod %in% kody)
+
+# Kontrola jednoznaczności danych
+stopifnot(nrow(pozycje) > 0)
+
+if (anyDuplicated(pozycje[c("data", "kod")])) {
+  stop("Występują duplikaty miesiąc-kod.")
+}
+
+# 3. Pełna siatka miesiąc × kod
+pelne <- expand_grid(
+  data = seq(min(pozycje$data), max(pozycje$data),
+             by = "month"),
+  kod = kody
+) |>
+  left_join(pozycje, by = c("data", "kod"))
+
+# 4. Połączenie kodów w 7 kategorii
+skladniki <- pelne |>
+  mutate(
+    kategoria = case_when(
+      kod == 20 ~ "Podatki od osób fizycznych",
+      kod == 30 ~ "Podatki od przedsiębiorstw",
+      kod %in% c(50, 60, 70) ~ "Ubezpieczenia i emerytury",
+      kod == 80 ~ "Akcyza",
+      kod == 90 ~ "Podatki od spadków i darowizn",
+      kod == 100 ~ "Cła",
+      kod == 110 ~ "Pozostałe dochody"
+    )
+  ) |>
+  group_by(data, kategoria) |>
+  summarise(
+    wartosc = if (anyNA(wartosc)) NA_real_
+              else sum(wartosc),
+    .groups = "drop"
+  )
+
+# 5. Statystyki opisowe
+n_miesiecy <- n_distinct(skladniki$data)
+n_kategorii <- n_distinct(skladniki$kategoria)
+n_obserwacji <- nrow(skladniki)
+n_brakow <- sum(is.na(skladniki$wartosc))
+
+# 6. Tabela
+tabela <- tibble(
+  Wskaznik = c(
+    "Początek okresu",
+    "Koniec okresu",
+    "Częstotliwość obserwacji",
+    "Liczba miesięcy",
+    "Liczba kategorii przychodow",
+    "Liczba obserwacji (miesiąc x kategoria)",
+    "Liczba brakujących wartości"
+  ),
+  Wartosc = c(
+    format(min(skladniki$data), "%Y-%m"),
+    format(max(skladniki$data), "%Y-%m"),
+    "miesięczna",
+    n_miesiecy,
+    n_kategorii,
+    n_obserwacji,
+    n_brakow
+  )
+)
+
+knitr::kable(
+  tabela,
+  col.names = c("Wskaźnik", "Wartość"),
+  caption = "Charakterystyka analizowanego zbioru danych",
+  align = c("l", "c")
+)
+
+```
+
+Analizowany zbiór danych obejmuje miesięczne wpływy do budżetu federalnego Stanów Zjednoczonych w okresie od marca 2015 roku do września 2026 roku. Dla 7 kategorii składowych uwzględniono 139 miesięcy, co daje 973 obserwacje; liczba ta nie obejmuje szeregu dochodów ogółem. Dane mają regularną częstotliwość miesięczną i nie zawierają brakujących wartości.
+
+Długość analizowanego okresu umożliwia identyfikację długookresowych tendencji oraz potencjalnych wzorców sezonowych. Jednocześnie podział wpływów na poszczególne kategorie pozwala na zastosowanie metod hierarchicznego prognozowania szeregów czasowych, uwzględniających zależności między poziomem zagregowanym a jego składowymi.
+
+\newpage
+
+## Statystyki opisowe
+
+```{r tab2 }
+skladniki$kategoria <- enc2utf8(skladniki$kategoria)
+statystyki <- skladniki |>
+  mutate(mld_usd = wartosc / 1e9) |>
+  group_by(kategoria) |>
+  summarise(
+    Srednia = mean(mld_usd, na.rm = TRUE),
+    Mediana = median(mld_usd, na.rm = TRUE),
+    SD = sd(mld_usd, na.rm = TRUE),
+    Minimum = min(mld_usd, na.rm = TRUE),
+    Maksimum = max(mld_usd, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  mutate(
+    across(
+      c(Srednia, Mediana, SD, Minimum, Maksimum),
+      ~ sprintf("%.3f", .x)
+    )
+  )
+
+kable(
+  statystyki,
+  col.names = c(
+    "Kategoria",
+    "Srednia",
+    "Mediana",
+    "Odch. stand.",
+    "Minimum",
+    "Maksimum"
+  ),
+  caption = "Statystyki opisowe miesiecznych wplywow (mld USD)",
+  align = c("l", rep("r", 5)),
+  booktabs = TRUE
+)
+
+```
+Statystyki opisowe przedstawione w tabeli 2 wskazują na znaczne zróżnicowanie poziomu oraz zmienności miesięcznych wpływów budżetowych w zależności od analizowanej kategorii.
+
+Najwyższą średnią miesięczną wartością wpływów charakteryzowały się podatki od osób fizycznych (172,009 mld USD), a następnie składki na ubezpieczenia społeczne i emerytalne (117,530 mld USD). Najniższą średnią odnotowano natomiast w kategorii podatków od spadków i darowizn (2,205 mld USD).
+
+Różnice występują również w zakresie zmienności poszczególnych szeregów. Najwyższe odchylenie standardowe w ujęciu bezwzględnym zaobserwowano dla podatków od osób fizycznych (92,871 mld USD). Z kolei w przypadku podatków od przedsiębiorstw odchylenie standardowe (31,625 mld USD) przekracza średnią wartość wpływów (29,246 mld USD), co wskazuje na szczególnie wysoką zmienność względną tej kategorii.
+
+Dodatkowo zauważalne różnice między średnią a medianą, zwłaszcza w przypadku podatków od przedsiębiorstw i podatków od osób fizycznych, mogą wskazywać na asymetrię rozkładów; interpretację tę należy rozpatrywać łącznie z analizą wykresów rozkładów.
+
+
+
+## Przebieg miesięcznych dochodów ogółem
+
+```{r dane}
+
+awaiting <- expand_grid(
+  data = seq(min(dt$data), max(dt$data), by = "month"),
+  kod = map$kod
+)
+
+braki <- anti_join(awaiting, dt, by = c("data", "kod"))
+
+duplicates <- dt |>
+  count(data, kod) |>
+  filter(n != 1)
+
+if (nrow(braki) > 0 ||
+    nrow(duplicates) > 0 ||
+    anyNA(dt$usd)) {
+  stop("W danych są braki lub duplikaty")
+}
+
+szeregi <- dt |>
+  group_by(data, kategoria) |>
+  summarise(usd = sum(usd), .groups = "drop") |>
+  mutate(mld_usd = usd / 1e9)
+
+skladniki <- szeregi |>
+  filter(kategoria != "Ogółem")
+
+ogolem <- szeregi |>
+  filter(kategoria == "Ogółem")
+
+
+# 4. Sprawdzenie zgodności sumy składników z opublikowanymi dochodami ogółem
+
+kontrola <- skladniki |>
+  group_by(data) |>
+  summarise(suma_skladnikow = sum(usd), .groups = "drop") |>
+  left_join(
+    ogolem |> select(data, suma_opublikowana = usd),
+    by = "data"
+  ) |>
+  mutate(roznica_usd = suma_opublikowana - suma_skladnikow)
+
+# print(
+#   kontrola |>
+#     summarise(
+#       liczba_miesiecy = n(),
+#       poczatek = min(data),
+#       koniec = max(data),
+#       maks_roznica_usd = max(abs(roznica_usd))
+#     )
+# )
+
+if (any(abs(kontrola$roznica_usd) > 1)) {
+  warning("Różnica sumowania przekracza 1 USD. Sprawdź kategorie.")
+}
+
+
+# 5. Wykres dochodów ogółem
+
+p1 <- ggplot(ogolem, aes(data, mld_usd)) +
+  geom_line(color = palette[5], linewidth = 0.7) +
+  labs(
+    title = "Miesięczne dochody budżetu USA",
+    x = NULL,
+    y = "Mld USD"
+  ) +
+  theme_minimal()
+
+print(p1)
+
+```
+
+Miesięczne dochody federalne USA wykazują znaczne wahania. W kolejnych latach widoczne są wyraźne szczyty wpływów, często przypadające na kwiecień. Przykładowo w kwietniu 2022 r. dochody wyniosły około 864 mld USD, a w maju spadły do 389 mld USD. Powtarzalność szczytów sugeruje występowanie sezonowości rocznej, która może być związana z terminami rozliczeń i wpłat podatkowych. W dalszej części analizy porównano rozkłady dochodów w poszczególnych miesiącach kalendarzowych.
+
+## Przebieg miesięcznych wpływów według kategorii
+
+```{r pojedyncze_wykresy}
+
+p2 <- ggplot(
+  skladniki,
+  aes(x = data, y = mld_usd, colour = kategoria)
+) +
+  geom_line(linewidth = 0.6) +
+  facet_wrap(~ kategoria, ncol = 2, scales = "free_y") +
+  scale_colour_manual(values = palette, guide = "none") +
+  labs(
+    title = "Miesięczne dochody federalne USA według kategorii",
+    x = NULL,
+    y = "Mld USD"
+  ) +
+  theme_minimal()
+
+print(p2)
+
+```
+
+Ocena wizualna wykresów wskazuje na wyraźną tendencję wzrostową w kategorii „Ubezpieczenia i emerytury”. Wpływy z podatków od osób fizycznych również rosną w badanym okresie, a ich przebieg charakteryzuje się wyraźnymi, powtarzającymi się szczytami. Wpływy z podatków od przedsiębiorstw wykazują kilka szczytów w ciągu roku. Powtarzalność tych wahań w obu kategoriach podatków dochodowych sugeruje występowanie sezonowości.
+
+Wpływy z akcyzy przez większość okresu oscylują wokół podobnego poziomu, przy występowaniu okresowych, gwałtownych zmian wartości. W podatkach od spadków i darowizn wyróżnia się pojedyncza wysoka obserwacja, natomiast w pozostałych dochodach około 2023 r. wykres sugeruje obniżenie poziomu wpływów. Wpływy z ceł zmieniają się stosunkowo łagodnie przez większość badanego okresu, a pod koniec szeregu widać gwałtowny wzrost, po którym pojawia się wartość ujemna. Na podstawie wykresu liniowego trudno jednoznacznie ocenić sezonowość akcyzy i ceł.
+
+# Opis planowanej hierarchii danych
+
+## Schemat hierarchii wpływów budżetowych
+```{r hierarchia, echo=FALSE, fig.width=8, fig.height=5, fig.align="center"}
+
+wezly <- tibble::tibble(
+  kategoria = c(
+    "Podatki od osób fizycznych",
+    "Akcyza",
+    "Podatki od spadków i darowizn",
+    "Ubezpieczenia i emerytury",
+    "Podatki od przedsiębiorstw",
+    "Cła",
+    "Pozostałe dochody"
+  ),
+  grupa = rep(c("Grupa 1", "Grupa 2"), times = c(3, 4)),
+  y = c(8, 7, 6, 4, 3, 2, 1)
+) |>
+  mutate(etykieta = stringr::str_wrap(kategoria, width = 26))
+
+grupy <- wezly |>
+  group_by(grupa) |>
+  summarise(
+    y_min = min(y),
+    y_max = max(y),
+    y = (y_min + y_max) / 2,
+    .groups = "drop"
+  )
+
+srodek <- mean(grupy$y)
+
+ggplot() +
+  # Połączenia od „Ogółem” do dwóch grup
+  annotate(
+    "segment", x = 0.8, xend = 1.9,
+    y = srodek, yend = srodek, colour = "grey65"
+  ) +
+  annotate(
+    "segment", x = 1.9, xend = 1.9,
+    y = min(grupy$y), yend = max(grupy$y), colour = "grey65"
+  ) +
+  geom_segment(
+    data = grupy,
+    aes(x = 1.9, xend = 3.8, y = y, yend = y),
+    colour = "grey65"
+  ) +
+  # Połączenia od grup do kategorii
+  geom_segment(
+    data = grupy,
+    aes(x = 3.8, xend = 3.8, y = y_min, yend = y_max),
+    colour = "grey65"
+  ) +
+  geom_segment(
+    data = wezly,
+    aes(x = 3.8, xend = 4.3, y = y, yend = y),
+    colour = "grey65"
+  ) +
+  # Etykiety trzech poziomów
+  annotate(
+    "label", x = 0.8, y = srodek,
+    label = "Dochody\nogółem",
+    fill = "#333333", colour = "white",
+    fontface = "bold", size = 4
+  ) +
+  geom_label(
+    data = grupy,
+    aes(x = 2.8, y = y, label = grupa),
+    fill = "grey93", colour = "grey20",
+    fontface = "bold", size = 4
+  ) +
+  geom_label(
+    data = wezly,
+    aes(x = 4.3, y = y, label = etykieta, colour = kategoria),
+    hjust = 0, fill = "white", fontface = "bold", size = 3.8,
+    show.legend = FALSE
+  ) +
+  scale_colour_manual(values = palette) +
+  coord_cartesian(xlim = c(0, 7.5), ylim = c(0.5, 8.5)) +
+  labs(title = "Hierarchia miesięcznych dochodów federalnych USA") +
+  theme_void() +
+  theme(plot.title = element_text(face = "bold", hjust = 0.5))
+
+```
+
+Na potrzeby analizy zaproponowano trójpoziomową strukturę hierarchiczną miesięcznych wpływów do budżetu federalnego Stanów Zjednoczonych. Najwyższy poziom hierarchii stanowią dochody ogółem, poziom pośredni obejmuje dwie grupy wpływów, natomiast najniższy składa się z siedmiu szczegółowych kategorii wpływów budżetowych.
+
+Do **Grupy 1** przyporządkowano podatki od osób fizycznych, akcyzę oraz podatki od spadków i darowizn. **Grupa 2** obejmuje natomiast wpływy z ubezpieczeń i emerytur, podatków od przedsiębiorstw, ceł oraz pozostałych dochodów.
+
+Przyjęta hierarchia ma charakter agregacyjny, co oznacza, że wartości szeregów zagregowanych wyznacza się jako sumy wartości odpowiednich szeregów składowych. Tak skonstruowana struktura umożliwia analizę danych na różnych poziomach szczegółowości oraz zastosowanie metod hierarchicznego prognozowania szeregów czasowych.
+
+W szczególności pozwala na porównanie podejść bottom-up (**BU**), top-down (**TD**) i middle-out (**MO**) oraz innych metod uzgadniania prognoz, których celem jest zapewnienie spójności prognoz pomiędzy poszczególnymi poziomami hierarchii.
+
+## Udziały poszczególnych kategorii w rocznych wpływach budżetowych
+
+```{r kolejny_wyrkes}
+roczne <- skladniki |>
+  mutate(rok = as.integer(format(data, "%Y"))) |>
+  group_by(rok, kategoria) |>
+  summarise(
+    liczba_miesiecy = n_distinct(data),
+    usd = sum(usd),
+    .groups = "drop"
+  ) |>
+  group_by(rok) |>
+  filter(n() == 7, all(liczba_miesiecy == 12)) |>
+  mutate(udzial = usd / sum(usd)) |>
+  ungroup()
+# Udziały grup w dochodach w pełnych latach kalendarzowych
+roczne_grupy <- roczne |>
+  inner_join(
+    wezly |> select(kategoria, grupa),
+    by = "kategoria"
+  ) |>
+  group_by(rok, grupa) |>
+  summarise(
+    udzial = sum(udzial),
+    .groups = "drop"
+  )
+```
+
+Ocena wizualna wykresu sugeruje względną stabilność struktury udziałów poszczególnych kategorii w rocznych wpływach do budżetu federalnego Stanów Zjednoczonych w analizowanym okresie. Największy udział w dochodach miały podatki od osób fizycznych oraz wpływy z ubezpieczeń i emerytur, które łącznie odpowiadały za zdecydowaną większość analizowanych wpływów.
+
+Pomimo ogólnej stabilności struktury można zaobserwować niewielkie zmiany udziałów poszczególnych kategorii między latami. W szczególności widoczne są wahania udziału podatków od przedsiębiorstw oraz okresowe zmiany proporcji między wpływami z podatków od osób fizycznych a wpływami z ubezpieczeń i emerytur. Pozostałe kategorie charakteryzowały się stosunkowo niewielkim udziałem w całkowitych wpływach.
+
+
+```{r ten_drugi_wykres}
+
+
+p4 <- ggplot(roczne, aes(x = factor(rok), y = udzial, fill = kategoria)) +
+  geom_col(width = 0.75) +
+  scale_fill_manual(values = palette) +
+  scale_y_continuous(
+    labels = scales::label_percent(),
+    breaks = seq(0, 1, by = 0.25)
+  ) +
+  labs(
+    title = "Struktura dochodów federalnych USA według kategorii",
+    subtitle = "Pełne lata kalendarzowe",
+    x = "Rok",
+    y = "Udział w dochodach",
+    fill = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom") +
+  guides(fill = guide_legend(ncol = 2))
+
+print(p4)
+
+``` 
+
+```{r kolejny wykres}
+
+wezly <- tibble(
+  kategoria = c(
+    "Podatki od osób fizycznych",
+    "Akcyza",
+    "Podatki od spadków i darowizn",
+    "Ubezpieczenia i emerytury",
+    "Podatki od przedsiębiorstw",
+    "Cła",
+    "Pozostałe dochody"
+  ),
+  grupa = c(
+    rep("Grupa 1", 3),
+    rep("Grupa 2", 4)
+  )
+)
+
+# Wybór wartości w miliardach USD
+skladniki_mld <- skladniki
+
+if ("mld_usd" %in% names(skladniki_mld)) {
+  skladniki_mld$kwota_mld <- skladniki_mld$mld_usd
+} else {
+  skladniki_mld$kwota_mld <- skladniki_mld$wartosc / 1e9
+}
+
+# Agregacja miesięczna według grup
+miesieczne_grupy <- skladniki_mld |>
+  inner_join(
+    wezly |> select(kategoria, grupa) |> distinct(),
+    by = "kategoria"
+  ) |>
+  filter(grupa %in% c("Grupa 1", "Grupa 2")) |>
+  group_by(data, grupa) |>
+  summarise(
+    mld_usd = sum(kwota_mld),
+    .groups = "drop"
+  )
+
+# Wykres
+p6 <- ggplot(
+  miesieczne_grupy,
+  aes(x = data, y = mld_usd, color = grupa)
+) +
+  geom_line(linewidth = 0.8) +
+  scale_color_manual(
+    values = c(
+      "Grupa 1" = palette[8],
+      "Grupa 2" = palette[9]
+    )
+  ) +
+  scale_x_date(
+    date_breaks = "1 year",
+    date_labels = "%Y"
+  ) +
+  scale_y_continuous(
+    labels = scales::label_number()
+  ) +
+  labs(
+    title = "Miesięczne dochody federalne USA według grup",
+    subtitle = "Marzec 2015 – wrzesień 2026",
+    x = "Rok",
+    y = "Dochody (mld USD)",
+    color = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1
+    )
+  )
+
+p6 <- p6 +
+  facet_wrap(
+    ~ grupa,
+    ncol = 1,
+    scales = "fixed"
+  ) +
+  labs(
+    title = "Miesięczne dochody federalne USA według grup",
+    subtitle = "Marzec 2015 – wrzesień 2026",
+    x = "Rok",
+    y = "Dochody (mld USD)"
+  ) +
+  theme(
+    legend.position = "none",
+    strip.text = element_text(
+      size = 12,
+      face = "bold"
+    ),
+    panel.spacing = grid::unit(1.5, "lines")
+  )
+
+print(p6)
+```
+Na przedstawionych wykresach można zaobserwować tendencję wzrostową miesięcznych wpływów budżetowych w obu analizowanych grupach. W obu szeregach widoczne są również powtarzające się wahania, sugerujące występowanie sezonowości.
+
+Grupa 1 charakteryzuje się znacznie większą amplitudą wahań, szczególnie w drugiej części analizowanego okresu. Widoczne są wyraźne, okresowo powtarzające się maksima, których wartości w ostatnich latach przewyższają poziomy obserwowane na początku szeregu. Może to sugerować wzrost zmienności bezwzględnej wraz ze wzrostem poziomu wpływów.
+
+W przypadku Grupy 2 przebieg szeregu jest bardziej regularny, a wahania sezonowe mają mniejszą amplitudę. Ocena wizualna wskazuje na mniejszą amplitudę wahań wpływów w ujęciu bezwzględnym niż w Grupie 1.
+
+Zaobserwowane różnice wskazują na odmienne charakterystyki analizowanych szeregów czasowych, co może mieć znaczenie przy doborze modeli prognostycznych oraz porównywaniu ich skuteczności.
+
+
+Ocena wizualna wykresu sugeruje względną stabilność udziałów obu grup w rocznych wpływach budżetowych w analizowanym okresie.
+
+```{r pierwszy_wykres}
+p5 <- ggplot(roczne_grupy, aes(x = factor(rok), y = udzial, fill = grupa)) +
+  geom_col(width = 0.75) +
+  scale_fill_manual(
+    values = c("Grupa 1" = palette[8], "Grupa 2" =  palette[9])
+  ) +
+  scale_y_continuous(
+    labels = scales::label_percent(),
+    breaks = seq(0, 1, by = 0.25)
+  ) +
+  geom_hline(yintercept = 0.5, linetype = "dashed", colour = "grey30") +
+  labs(
+    title = "Udział grup w dochodach federalnych USA",
+    subtitle = "Pełne lata kalendarzowe",
+    x = "Rok",
+    y = "Udział w dochodach",
+    fill = NULL
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+print(p5)
+
+```
+
+Podobnie jak w przypadku poszczególnych kategorii, wykres sugeruje względną stabilność udziałów obu grup w czasie.
+Udziały obu grup są bardziej zbliżone do siebie niż udziały poszczególnych kategorii.
+
+# Wstępna analiza sezonowości
+
+```{r boxploty}
+
+
+# Przygotowanie danych
+sezonowosc <- skladniki |>
+  mutate(
+    rok = as.integer(format(data, "%Y")),
+    miesiac = factor(
+      format(data, "%m"),
+      levels = sprintf("%02d", 1:12),
+      labels = c(
+        "Sty", "Lut", "Mar", "Kwi",
+        "Maj", "Cze", "Lip", "Sie",
+        "Wrz", "Paz", "Lis", "Gru"
+      )
+    )
+  ) |>
+  filter(rok >= 2016, rok <= 2025)
+
+# Wykres pudełkowy
+p7 <- ggplot(
+  sezonowosc,
+  aes(x = miesiac, y = mld_usd)
+) +
+  geom_boxplot(
+    fill = "#B9E5E8",
+    color = "grey25",
+    outlier.color = "#C44E52",
+    outlier.alpha = 0.7,
+    width = 0.7
+  ) +
+  facet_wrap(
+    ~ kategoria,
+    scales = "free_y",
+    ncol = 2
+  ) +
+  labs(
+    title = "Rozklad miesiecznych wplywow budzetowych USA",
+    subtitle = "Pelne lata kalendarzowe 2016-2025",
+    x = "Miesiac",
+    y = "Wplywy (mld USD)"
+  ) +
+  theme_minimal() +
+  theme(
+    strip.text = element_text(
+      size = 11,
+      face = "bold"
+    ),
+    axis.text.x = element_text(
+      angle = 45,
+      hjust = 1
+    ),
+    panel.spacing = grid::unit(1.5, "lines")
+  )
+
+print(p7)
+
+```
+
+```{r sezonowość}
+
+library(dplyr)
+library(knitr)
+
+sila_sezonowosci <- skladniki |>
+  filter(
+    data >= as.Date("2016-01-01"),
+    data <= as.Date("2025-12-01")
+  ) |>
+  group_by(kategoria) |>
+  group_modify(~ {
+
+    x <- .x |> arrange(data)
+
+    szereg <- ts(
+      x$mld_usd,
+      frequency = 12
+    )
+
+    model <- stl(
+      szereg,
+      s.window = "periodic",
+      robust = TRUE
+    )
+
+    S <- model$time.series[, "seasonal"]
+    R <- model$time.series[, "remainder"]
+
+    Fs <- max(
+      0,
+      1 - var(R) / var(S + R)
+    )
+
+    tibble(Fs = round(Fs, 3))
+  }) |>
+  ungroup() |>
+  arrange(desc(Fs))
+
+kable(
+  sila_sezonowosci,
+  col.names = c(
+    "Kategoria",
+    "Sila sezonowosci (0-1)"
+  ),
+  caption = "Porownanie sily sezonowosci"
+)
+
+
+```
+
+Analiza rozkładów miesięcznych wpływów budżetowych wskazuje na występowanie zróżnicowanych wzorców sezonowych w poszczególnych kategoriach wpływów. Szczególnie wyraźne różnice między miesiącami można zaobserwować w przypadku podatków od osób fizycznych oraz podatków od przedsiębiorstw. W pierwszej z wymienionych kategorii charakterystyczny jest znaczny wzrost wpływów w kwietniu, co może być związane z terminami rozliczeń podatkowych w Stanach Zjednoczonych.
+
+W celu ilościowego porównania siły sezonowości wykorzystano miarę opartą na dekompozycji STL. Najwyższe wartości uzyskano dla kategorii ubezpieczeń i emerytur (0,760) oraz podatków od przedsiębiorstw (0,744), co wskazuje na silnie zaznaczoną sezonowość względem wahań resztowych. Stosunkowo wysoką wartość odnotowano również dla podatków od osób fizycznych (0,609).
+
+Najniższą siłę sezonowości zaobserwowano natomiast dla ceł (0,089) oraz podatków od spadków i darowizn (0,080). Sugeruje to, że w tych kategoriach regularne wahania sezonowe mają niewielkie znaczenie w porównaniu ze zmiennością resztową.
+
+Uzyskane wyniki wskazują na zróżnicowanie charakterystyki sezonowej analizowanych szeregów czasowych. Stanowi to przesłankę do uwzględnienia sezonowości podczas dalszego modelowania oraz porównania skuteczności różnych metod prognozowania.
+
+
+```{r tabele}
+
+
+library(dplyr)
+library(knitr)
+
+# ============================================================
+# 1. Przygotowanie danych
+# ============================================================
+
+# Odtworzenie nazw kategorii, aby uniknac bledow UTF-8
+dane_stl <- skladniki |>
+  mutate(
+    kategoria = case_when(
+      grepl("^Akcyza", kategoria, useBytes = TRUE) ~
+        "Akcyza",
+      grepl("^C", kategoria, useBytes = TRUE) ~
+        "C\u0142a",
+      grepl("^Podatki od os", kategoria, useBytes = TRUE) ~
+        "Podatki od os\u00F3b fizycznych",
+      grepl("^Podatki od przedsi", kategoria, useBytes = TRUE) ~
+        "Podatki od przedsi\u0119biorstw",
+      grepl("^Podatki od spadk", kategoria, useBytes = TRUE) ~
+        "Podatki od spadk\u00F3w i darowizn",
+      grepl("^Pozosta", kategoria, useBytes = TRUE) ~
+        "Pozosta\u0142e dochody",
+      grepl("^Ubezpieczenia", kategoria, useBytes = TRUE) ~
+        "Ubezpieczenia i emerytury",
+      TRUE ~ NA_character_
+    )
+  ) |>
+  arrange(kategoria, data)
+
+if (anyNA(dane_stl$kategoria)) {
+  stop("Nie rozpoznano wszystkich kategorii.")
+}
+
+# ============================================================
+# 2. Wykrywanie obserwacji nietypowych: STL + MAD
+# ============================================================
+
+anomalia_stl <- dane_stl |>
+  group_by(kategoria) |>
+  group_modify(~ {
+
+    x <- arrange(.x, data)
+
+    # Kontrola ciaglosci szeregu
+    oczekiwane_daty <- seq(
+      min(x$data),
+      max(x$data),
+      by = "month"
+    )
+
+    if (!identical(x$data, oczekiwane_daty) ||
+        anyNA(x$mld_usd)) {
+      stop("Szereg zawiera brakujace lub powtorzone miesiace.")
+    }
+
+    # Szereg miesieczny
+    y <- ts(
+      x$mld_usd,
+      start = c(
+        as.integer(format(min(x$data), "%Y")),
+        as.integer(format(min(x$data), "%m"))
+      ),
+      frequency = 12
+    )
+
+    # Odporna dekompozycja STL
+    model <- stl(
+      y,
+      s.window = "periodic",
+      robust = TRUE
+    )
+
+    trend <- as.numeric(model$time.series[, "trend"])
+    sezon <- as.numeric(model$time.series[, "seasonal"])
+    reszty <- as.numeric(model$time.series[, "remainder"])
+
+    # Poziom wynikający z dekompozycji STL = trend + składnik sezonowy
+    poziom <- trend + sezon
+
+    # Odporna miara rozproszenia
+    med <- median(reszty)
+    mad_r <- mad(reszty, constant = 1.4826)
+
+    if (!is.finite(mad_r) || mad_r <= 0) {
+      stop("Nie mozna obliczyc wyniku MAD dla szeregu.")
+    }
+
+    # Wynik MAD
+    wynik_mad <- abs(reszty - med) / mad_r
+
+    tibble(
+      data = x$data,
+      wartosc = x$mld_usd,
+      oczekiwana = poziom,
+      reszta = reszty,
+      wynik_mad = wynik_mad,
+
+      odchylenie_proc = ifelse(
+        abs(poziom) > 1e-8,
+        100 * reszty / abs(poziom),
+        NA_real_
+      ),
+
+      nietypowa = wynik_mad > 3
+    )
+  }) |>
+  ungroup()
+
+# ============================================================
+# 3. TABELA 1 - liczba nietypowych miesiecy
+# ============================================================
+
+tabela_anomalie <- anomalia_stl |>
+  group_by(kategoria) |>
+  summarise(
+    liczba = sum(nietypowa),
+    .groups = "drop"
+  ) |>
+  arrange(desc(liczba))
+
+kable(
+  tabela_anomalie,
+  col.names = c(
+    "Kategoria",
+    "Liczba nietypowych miesi\u0119cy"
+  ),
+  caption = "Liczba miesi\u0119cy oznaczonych jako nietypowe",
+  booktabs = TRUE,
+  align = c("l", "r")
+)
+
+
+```
+
+
+```{r największe_odch}
+
+
+# ============================================================
+# 4. TABELA 2 - 10 najwiekszych odchylen
+# ============================================================
+
+tabela_najwieksze <- anomalia_stl |>
+  filter(nietypowa) |>
+  arrange(desc(wynik_mad)) |>
+  slice_head(n = 10) |>
+  transmute(
+    kategoria,
+    miesiac = format(data, "%Y-%m"),
+    odchylenie = ifelse(
+      is.na(odchylenie_proc),
+      "n.d.",
+      sprintf("%.1f", odchylenie_proc)
+    ),
+    mad = sprintf("%.1f", wynik_mad)
+  )
+
+kable(
+  tabela_najwieksze,
+  col.names = c(
+    "Kategoria",
+    "Miesi\u0105c",
+    "Odchylenie (%)",
+    "Wynik MAD"
+  ),
+  caption = "Najwi\u0119ksze nietypowe odchylenia od trendu i sezonowo\u015Bci",
+  booktabs = TRUE,
+  align = c("l", "c", "r", "r")
+)
+```
+Największą liczbę obserwacji nietypowych odnotowano w kategorii ceł. Jedną z hipotez wyjaśniających te odchylenia jest wpływ zmian polityki handlowej i celnej. Jej weryfikacja wymaga zestawienia terminów wykrytych obserwacji nietypowych z informacjami o konkretnych zmianach tej polityki.
