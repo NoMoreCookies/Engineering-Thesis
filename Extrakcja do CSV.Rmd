@@ -1,0 +1,151 @@
+---
+title: "Palety kolorów PWr"
+output: pdf_document
+header-includes:
+  - \usepackage{xcolor}
+  - \definecolor{div1}{HTML}{C69214}
+  - \definecolor{div2}{HTML}{D0A134}
+  - \definecolor{div3}{HTML}{D9AF4E}
+  - \definecolor{div4}{HTML}{E2BE66}
+  - \definecolor{div5}{HTML}{ECCC7E}
+  - \definecolor{div6}{HTML}{F5DB96}
+  - \definecolor{div7}{HTML}{FFE9AE}
+  - \definecolor{div8}{HTML}{EFCA8C}
+  - \definecolor{div9}{HTML}{DFAA6D}
+  - \definecolor{div10}{HTML}{D08A52}
+  - \definecolor{div11}{HTML}{BF693B}
+  - \definecolor{div12}{HTML}{AE462B}
+  - \definecolor{div13}{HTML}{9B1C1F}
+  - \definecolor{cat1}{HTML}{C69200}
+  - \definecolor{cat2}{HTML}{5DA118}
+  - \definecolor{cat3}{HTML}{00A06D}
+  - \definecolor{cat4}{HTML}{0093B9}
+  - \definecolor{cat5}{HTML}{007ADC}
+  - \definecolor{cat6}{HTML}{7851BF}
+  - \definecolor{cat7}{HTML}{AA1471}
+  - \definecolor{cat8}{HTML}{9B1C1F}
+---
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(jsonlite)
+library(readr) 
+
+```
+
+```{r dt}
+
+dt <- read_csv("DANE_FINANSOWE.csv")
+
+```
+
+```{r fs}
+# 1. PEŁNA PALETA DYWERGENCYJNA (13 kolorów ze zrzutu ekranu)
+# Idealna do map ciepła (heatmap) i warunkowego formatowania komórek w gt
+PALETTE_PWR_DIV <- c(
+  "#c69214", "#d0a134", "#d9af4e", "#e2be66", "#eccc7e", "#f5db96",
+  "#ffe9ae", # Jasny środek (punkt neutralny / zero)
+  "#efca8c", "#dfaa6d", "#d08a52", "#bf693b", "#ae462b", "#9b1c1f"
+)
+
+# 8-elementowa paleta kategoryczna oparta na Twoim zrzucie ekranu
+PALETTE_PWR_CAT_FULL <- c(
+  "#c69200", # Złoty / musztardowy[cite: 2]
+  "#5da118", # Żywa zieleń[cite: 2]
+  "#00a06d", # Morska zieleń / teal[cite: 2]
+  "#0093b9", # Cyjan / turkus[cite: 2]
+  "#007adc", # Jasny błękit[cite: 2]
+  "#7851bf", # Fiolet / indigo[cite: 2]
+  "#aa1471", # Magenta / purpura[cite: 2]
+  "#9b1c1f"  # Czerwień PWr (zamknięcie palety)[cite: 2]
+)
+```
+### Zestawienie palet kolorystycznych
+
+W projekcie wykorzystano dwie komplementarne palety barw, nawiązujące do identyfikacji wizualnej Politechniki Wrocławskiej:
+
+#### 1. Paleta dywergencyjno-ciągła (gradientowa)
+Składa się z 13 odcieni przechodzących płynnie od głębokiego złota, przez jasnokremowy punkt neutralny, aż po czerwień PWr.
+
+\noindent\makebox[\textwidth][l]{%
+\textcolor{div1}{\rule{0.48cm}{0.4cm}}%
+\textcolor{div2}{\rule{0.48cm}{0.4cm}}%
+\textcolor{div3}{\rule{0.48cm}{0.4cm}}%
+\textcolor{div4}{\rule{0.48cm}{0.4cm}}%
+\textcolor{div5}{\rule{0.48cm}{0.4cm}}%
+\textcolor{div6}{\rule{0.48cm}{0.4cm}}%
+\textcolor{div7}{\rule{0.48cm}{0.4cm}}%
+\textcolor{div8}{\rule{0.48cm}{0.4cm}}%
+\textcolor{div9}{\rule{0.48cm}{0.4cm}}%
+\textcolor{div10}{\rule{0.48cm}{0.4cm}}%
+\textcolor{div11}{\rule{0.48cm}{0.4cm}}%
+\textcolor{div12}{\rule{0.48cm}{0.4cm}}%
+\textcolor{div13}{\rule{0.48cm}{0.4cm}}%
+}
+
+* **Kody HEX (do R):** `c("#c69214", "#d0a134", "#d9af4e", "#e2be66", "#eccc7e", "#f5db96", "#ffe9ae", "#efca8c", "#dfaa6d", "#d08a52", "#bf693b", "#ae462b", "#9b1c1f")`
+* **Zastosowanie:** Mapy ciepła, wykresy punktowe oparte na ciągłej skali liczbowej oraz warunkowe formatowanie w tabelach (`gt`).
+
+#### 2. Paleta kategoryczna (dyskretna)
+Składa się z 8 wyraźnie odseparowanych barw, które zapewniają wysoki kontrast między seriami danych.
+
+\noindent\makebox[\textwidth][l]{%
+\textcolor{cat1}{\rule{0.98cm}{0.4cm}}%
+\textcolor{cat2}{\rule{0.98cm}{0.4cm}}%
+\textcolor{cat3}{\rule{0.98cm}{0.4cm}}%
+\textcolor{cat4}{\rule{0.98cm}{0.4cm}}%
+\textcolor{cat5}{\rule{0.98cm}{0.4cm}}%
+\textcolor{cat6}{\rule{0.98cm}{0.4cm}}%
+\textcolor{cat7}{\rule{0.98cm}{0.4cm}}%
+\textcolor{cat8}{\rule{0.98cm}{0.4cm}}%
+}
+
+* **Kody HEX (do R):** `c("#c69200", "#5da118", "#00a06d", "#0093b9", "#007adc", "#7851bf", "#aa1471", "#9b1c1f")`
+* **Zastosowanie:** Wykresy słupkowe, wykresy liniowe z wieloma seriami oraz rozróżnianie kategorii.
+
+
+```{r heatmap}
+
+
+library(ggplot2)
+
+# Definicja palety dywergencyjnej
+PALETTE_PWR_DIV <- c
+  "#c69214", "#d0a134", "#d9af4e", "#e2be66", "#eccc7e", "#f5db96",
+  "#ffe9ae", "#efca8c", "#dfaa6d", "#d08a52", "#bf693b", "#ae462b", "#9b1c1f"
+)
+
+# Przykład 1: Mapa ciepła (Heatmapa) z użyciem mtcars
+ggplot(reshape2::melt(cor(mtcars)), aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradientn(colors = PALETTE_PWR_DIV, limits = c(-1, 1)) +
+  theme_minimal() +
+  labs(title = "Wykres typu Heatmap (Paleta ciągła/dywergencyjna)")
+```
+
+
+
+```{r wyk2}
+
+
+library(ggplot2)
+
+# Definicja palety kategorycznej
+PALETTE_PWR_CAT_FULL <- c(
+  "#c69200", "#5da118", "#00a06d", "#0093b9", 
+  "#007adc", "#7851bf", "#aa1471", "#9b1c1f"
+)
+
+# Rejestracja jako domyślna paleta dyskretna dla ggplot2 (opcjonalnie)
+# options(ggplot2.discrete.colour = PALETTE_PWR_CAT_FULL)
+
+# Przykład 2: Wykres liniowy z wieloma seriami (np. z pakietu gapminder lub wbudowanego economics)
+ggplot(iris, aes(x = Sepal.Length, y = Sepal.Width, color = Species)) +
+  geom_point(size = 3) +
+  scale_color_manual(values = PALETTE_PWR_CAT_FULL[c(8,2,4)]) + # Ręczne przypisanie palety
+  theme_minimal() +
+  labs(title = "Wykres punktowy z podziałem na kategorie (Paleta kategoryczna)")
+
+```
