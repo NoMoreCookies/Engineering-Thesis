@@ -1,0 +1,649 @@
+---
+title: "Tytuł pracy inżynierskiej"
+author: "Imię i Nazwisko"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    number_sections: true
+    toc: true
+fontsize: 12pt
+linestretch: 1.15
+lang: pl
+header-includes:
+  - \usepackage{ebgaramond}
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+# Czcionka
+
+W raportcie użwyamy czcionki **EB Garmond**
+
+Do składu pracy wykorzystano otwarty krój szeryfowy EB Garamond – współczesną, cyfrową rekonstrukcję klasycznej renesansowej antykwy Claude’a Garamonda. Wybór ten podyktowany jest wysoką ergonomią czytania długich partii tekstu naukowego, eleganckimi proporcjami charakterystycznymi dla publikacji wydawniczych oraz pełnym wsparciem dla polskiej typografii i składu w systemie LaTeX.
+
+
+#  Paleta Barw
+
+```{r paleta barw}
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# ==============================================================================
+# 1. DEFINICJE PALET KOLORÓW
+# ==============================================================================
+
+# Wariant A: Klasyczna elegancja finansowa (Navy & Gold/Ochre) - najlepsza do EB Garamond
+paleta_finansowa <- c(
+  "Rzeczywiste"      = "#1B365D", # Głęboki granat (Oxford Navy)
+  "Predykcja"        = "#D97724", # Ciepły bursztyn / Ochra
+  "Benchmark"        = "#6E7781", # Grafitowy szary
+  "Model_Dodatkowy"  = "#2E6F40", # Stonowana zieleń leśna (opcjonalnie)
+  "Siatka_Tla"       = "#E5E7EB"  # Jasny popiel
+)
+
+# Wariant B: Paleta naukowa Okabe-Ito (bezpieczna dla daltonistów, do wielu modeli)
+paleta_okabe_ito <- c(
+  "Rzeczywiste" = "#222222", # Antracyt / Prawie czarny
+  "Model_1"     = "#0072B2", # Stonowany niebieski
+  "Model_2"     = "#D55E00", # Ceglasty pomarańcz
+  "Model_3"     = "#009E73", # Morska zieleń
+  "Model_4"     = "#CC79A7"  # Przygaszony róż/śliwka
+)
+
+# Wariant C: Paleta korporacyjna / FT Style (Burgund & Błękit)
+paleta_ft_style <- c(
+  "Rzeczywiste" = "#0D3B66", # Ciemny błękit
+  "Predykcja"   = "#9E2A2B", # Głęboki burgund
+  "Benchmark"   = "#8D99AE"  # Chłodny szary
+)
+
+# ==============================================================================
+# 2. FUNKCJA DO PODGLĄDU PRÓBEK KOLORÓW (SWATCHES)
+# ==============================================================================
+
+podglad_palety <- function(paleta, tytul = "Podgląd palety") {
+  df <- data.frame(
+    Nazwa = factor(names(paleta), levels = rev(names(paleta))),
+    Hex   = unname(paleta),
+    x     = 1
+  )
+  
+  ggplot(df, aes(x = x, y = Nazwa, fill = Hex)) +
+    geom_tile(width = 0.9, height = 0.8, color = "white", linewidth = 1.5) +
+    geom_text(aes(label = paste0(Nazwa, "\n(", Hex, ")")), 
+              color = "white", fontface = "bold", size = 4) +
+    scale_fill_identity() +
+    labs(title = tytul) +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 14, margin = margin(b = 10))
+    )
+}
+
+# Wyświetlenie próbek wszystkich trzech palet w panelu Plots w RStudio:
+print(podglad_palety(paleta_finansowa, "Wariant A: Klasyczna elegancja finansowa"))
+print(podglad_palety(paleta_okabe_ito, "Wariant B: Naukowa (Okabe-Ito - 4 modele)"))
+print(podglad_palety(paleta_ft_style,  "Wariant C: Styl Financial Times (Burgund & Błękit)"))
+
+# ==============================================================================
+# 3. PRZYKŁADOWY WYKRES PREDYKCJI SZEREGU CZASOWEGO (Z UŻYCIEM WARIANTU A)
+# ==============================================================================
+
+set.seed(42)
+n <- 100
+daty <- seq.Date(from = as.Date("2024-01-01"), by = "day", length.out = n)
+rzeczywiste <- 100 + cumsum(rnorm(n, mean = 0.1, sd = 1.5))
+
+df_ts <- data.frame(
+  Data = daty,
+  Rzeczywiste = rzeczywiste,
+  Predykcja = c(rep(NA, 74), rzeczywiste[75], rzeczywiste[75] + cumsum(rnorm(25, 0.15, 1.1))),
+  Benchmark = c(rep(NA, 74), rep(rzeczywiste[75], 26)) # Np. naiwna prognoza Random Walk
+) %>%
+  mutate(
+    Dolny_95 = ifelse(!is.na(Predykcja), Predykcja - seq(0, 6, length.out = 26), NA),
+    Gorny_95 = ifelse(!is.na(Predykcja), Predykcja + seq(0, 6, length.out = 26), NA)
+  )
+
+# Rysowanie wykresu
+ggplot(df_ts, aes(x = Data)) +
+  # Przedział ufności 95%
+  geom_ribbon(aes(ymin = Dolny_95, ymax = Gorny_95), 
+              fill = paleta_finansowa["Predykcja"], alpha = 0.18, na.rm = TRUE) +
+  # Pionowa linia podziału Train / Test
+  geom_vline(xintercept = as.numeric(daty[75]), linetype = "dotted", color = "#6E7781", linewidth = 0.7) +
+  annotate("text", x = daty[73], y = max(rzeczywiste), label = "Zbiór treningowy", hjust = 1, size = 3.5, color = "#4B5563") +
+  annotate("text", x = daty[77], y = max(rzeczywiste), label = "Horyzont predykcji", hjust = 0, size = 3.5, color = "#4B5563") +
+  # Linie szeregów
+  geom_line(aes(y = Rzeczywiste, color = "Rzeczywiste"), linewidth = 0.85) +
+  geom_line(aes(y = Benchmark, color = "Benchmark"), linetype = "dashed", linewidth = 0.75, na.rm = TRUE) +
+  geom_line(aes(y = Predykcja, color = "Predykcja"), linewidth = 0.9, na.rm = TRUE) +
+  # Przypisanie kolorów z palety
+  scale_color_manual(
+    values = c(
+      "Rzeczywiste" = unname(paleta_finansowa["Rzeczywiste"]),
+      "Predykcja"   = unname(paleta_finansowa["Predykcja"]),
+      "Benchmark"   = unname(paleta_finansowa["Benchmark"])
+    )
+  ) +
+  labs(
+    title = "Porównanie prognozy z wartościami rzeczywistymi (Wariant A)",
+    subtitle = "Zaznaczono 95% przedział ufności oraz model bazowy (Random Walk)",
+    x = "Data",
+    y = "Wartość indeksu / Cena",
+    color = NULL
+  ) +
+  theme_minimal(base_size = 11) +
+  theme(
+    panel.grid.minor = element_blank(),
+    panel.grid.major = element_line(color = paleta_finansowa["Siatka_Tla"], linewidth = 0.4),
+    legend.position = "bottom",
+    plot.title = element_text(face = "bold", color = "#111827"),
+    plot.subtitle = element_text(color = "#4B5563", size = 9.5)
+  )
+
+
+```
+```{r pozostałe kolory}
+
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+# ==============================================================================
+# 1. DEFINICJE ROZSZERZONYCH PALET (10 KOLORÓW + HEATMAPY)
+# ==============================================================================
+
+# --- WARIANT A: Klasyczna elegancja finansowa (Navy & Gold) ---
+paleta_A_10 <- c(
+  "#1B365D", # 1. Głęboki granat (Oxford Navy)
+  "#D97724", # 2. Ciepły bursztyn
+  "#2E6F40", # 3. Leśna zieleń
+  "#8C2D19", # 4. Ciemny terakotowy / rdzawy
+  "#4A7C9B", # 5. Stalowy błękit
+  "#E5B25D", # 6. Stonowane złoto / musztarda
+  "#5C5346", # 7. Ciepły grafit / taupe
+  "#6B8E23", # 8. Oliwkowy
+  "#8E6C8A", # 9. Przygaszona śliwka
+  "#A3B18A"  # 10. Szałwiowy
+)
+heatmap_A_kor <- c("#8C2D19", "#F9FAFB", "#1B365D") # Korelacja (-1 -> 0 -> +1)
+heatmap_A_seq <- c("#F3F4F6", "#7A99AC", "#1B365D") # Wartości dodatnie (np. Feature Importance)
+
+# --- WARIANT B: Naukowa Okabe-Ito (rozszerzona do 10 kolorów) ---
+paleta_B_10 <- c(
+  "#0072B2", # 1. Niebieski
+  "#D55E00", # 2. Ceglasty pomarańcz
+  "#009E73", # 3. Morska zieleń
+  "#CC79A7", # 4. Przygaszony róż
+  "#E69F00", # 5. Złoty pomarańcz
+  "#56B4E9", # 6. Błękitny
+  "#332288", # 7. Głębokie indygo
+  "#882255", # 8. Purpurowy
+  "#44AA99", # 9. Turkusowo-miętowy
+  "#999933"  # 10. Oliwkowo-złoty
+)
+heatmap_B_kor <- c("#D55E00", "#FFFFFF", "#0072B2") # Korelacja (-1 -> 0 -> +1)
+heatmap_B_seq <- c("#F0F4F8", "#56B4E9", "#0072B2") # Wartości dodatnie
+
+# --- WARIANT C: Styl Financial Times (Burgund & Błękit) ---
+paleta_C_10 <- c(
+  "#0D3B66", # 1. Ciemny błękit
+  "#9E2A2B", # 2. Głęboki burgund
+  "#335C67", # 3. Ciemny morski
+  "#E09F3E", # 4. Ochra / Miodowy
+  "#540B0E", # 5. Ciemne wino
+  "#6D8EA0", # 6. Przygaszony niebieski
+  "#8D99AE", # 7. Chłodny szary
+  "#B56576", # 8. Stonowany róż indyjski
+  "#2B4141", # 9. Ciemny łupkowy
+  "#D4A373"  # 10. Piaskowy beż
+)
+heatmap_C_kor <- c("#9E2A2B", "#FDFBF7", "#0D3B66") # Korelacja (-1 -> 0 -> +1)
+heatmap_C_seq <- c("#F8F9FA", "#6D8EA0", "#0D3B66") # Wartości dodatnie
+
+# ==============================================================================
+# 2. PODGLĄD 10-KOLOROWYCH PALET (PRÓBKI + WYKRES KOŁOWY / DONUT)
+# ==============================================================================
+
+podglad_10_kolorow <- function(paleta, tytul) {
+  df <- data.frame(
+    Kategoria = factor(paste0("Klasa ", 1:10), levels = paste0("Klasa ", 1:10)),
+    Wartosc   = c(22, 18, 14, 11, 9, 8, 6, 5, 4, 3), # Malejące udziały (np. wagi w portfelu)
+    Kolor     = paleta
+  )
+  
+  # Wykres pierścieniowy (Donut chart - czytelniejszy niż klasyczny pie chart)
+  ggplot(df, aes(x = 2, y = Wartosc, fill = Kategoria)) +
+    geom_col(color = "white", linewidth = 0.8) +
+    coord_polar(theta = "y", start = 0) +
+    xlim(0.7, 2.5) +
+    scale_fill_manual(values = paleta) +
+    geom_text(aes(label = paste0(Wartosc, "%")), 
+              position = position_stack(vjust = 0.5), 
+              color = "white", fontface = "bold", size = 3.2) +
+    labs(title = tytul, fill = "Składnik") +
+    theme_void() +
+    theme(
+      plot.title = element_text(hjust = 0.5, face = "bold", size = 12, margin = margin(b = 5)),
+      legend.position = "right"
+    )
+}
+
+print(podglad_10_kolorow(paleta_A_10, "Wariant A (10 kolorów): Portfel / Udziały"))
+print(podglad_10_kolorow(paleta_B_10, "Wariant B (10 kolorów): Okabe-Ito Extended"))
+print(podglad_10_kolorow(paleta_C_10, "Wariant C (10 kolorów): Styl Financial Times"))
+
+# ==============================================================================
+# 3. PODGLĄD MACIERZY KORELACJI (HEATMAPA) DLA KAŻDEGO WARIANTU
+# ==============================================================================
+
+podglad_heatmapy <- function(kolory_kor, tytul) {
+  # Generowanie przykładowej macierzy korelacji 6x6 (np. wskaźników finansowych)
+  zmienne <- c("Zwrot", "Zmienność", "Wolumen", "RSI", "MACD", "Stopa_Proc")
+  set.seed(123)
+  mat <- cor(matrix(rnorm(600), ncol = 6))
+  colnames(mat) <- rownames(mat) <- zmienne
+  
+  df_cor <- as.data.frame(as.table(mat))
+  
+  ggplot(df_cor, aes(Var1, Var2, fill = Freq)) +
+    geom_tile(color = "white", linewidth = 1) +
+    geom_text(aes(label = sprintf("%.2f", Freq)), 
+              color = ifelse(abs(df_cor$Freq) > 0.5, "white", "#111827"), 
+              size = 3.5, fontface = "bold") +
+    scale_fill_gradient2(
+      low = kolory_kor[1], 
+      mid = kolory_kor[2], 
+      high = kolory_kor[3], 
+      midpoint = 0, 
+      limit = c(-1, 1),
+      name = "Korelacja"
+    ) +
+    labs(title = tytul, x = NULL, y = NULL) +
+    theme_minimal(base_size = 11) +
+    theme(
+      panel.grid = element_blank(),
+      plot.title = element_text(face = "bold", hjust = 0.5),
+      axis.text.x = element_text(angle = 45, hjust = 1)
+    )
+}
+
+print(podglad_heatmapy(heatmap_A_kor, "Heatmapa Wariant A (Burgund - Biel - Granat)"))
+print(podglad_heatmapy(heatmap_B_kor, "Heatmapa Wariant B (Pomarańcz - Biel - Niebieski)"))
+print(podglad_heatmapy(heatmap_C_kor, "Heatmapa Wariant C (Ciemne Wino - Krem - Błękit)"))
+
+```
+
+# Zasady dotyczące wykresów
+
+## Założenia edytorskie i standard wizualizacji danych
+
+W celu zapewnienia spójności typograficznej, wysokiej czytelności oraz profesjonalnego, wydawniczego charakteru pracy, przyjęto jednolity system projektowy obejmujący zarówno skład tekstu, jak i oprawę graficzną wykresów.
+
+### Typografia i skład dokumentu
+
+Do składu tekstu głównego wykorzystano otwarty krój szeryfowy **EB Garamond** — współczesną, cyfrową rekonstrukcję klasycznej renesansowej antykwy Claude’a Garamonda, skompilowaną w środowisku LaTeX z wykorzystaniem silnika `xelatex`. Wybór ten podyktowany jest następującymi przesłankami:
+
+* **Ergonomia czytania:** Wyraźne szeryfy charakterystyczne dla antykw renesansowych prowadzą wzrok wzdłuż wiersza, co ogranicza zmęczenie odbiorcy podczas analizy wielostronicowej dokumentacji technicznej i teoretycznej.
+* **Proporcje składu:** Zwarty rysunek znaków pozwala na zachowanie optymalnej liczby znaków w wierszu przy jednoczesnym utrzymaniu komfortowego światła między wierszami (interlinia $1{,}15$ oraz stopień pisma $12\text{ pt}$).
+* **Zgodność z polską typografią:** Krój posiada pełne wsparcie standardu OpenType, w tym komplet polskich znaków diakrytycznych, ligatury typograficzne oraz cyfry tabelaryczne ułatwiające prezentację zestawień liczbowych.
+
+### System kolorystyczny
+
+W wizualizacjach empirycznych zrezygnowano z domyślnych, wysokonasyconych palet programistycznych na rzecz stonowanej, instytucjonalnej kolorystyki o wysokim kontraście (inspirowanej raportami analitycznymi sektora finansowego), zachowującej pełną czytelność również po wydruku w skali szarości:
+
+* **Dane rzeczywiste (szereg historyczny):** głęboki granat (`#1B365D` — *Oxford Navy*), stanowiący główną, ciągłą linię odniesienia.
+* **Prognozy i modele główne:** ciepły bursztyn (`#D97724`), ciemna zieleń (`#2E6F40`) oraz terakota (`#8C2D19`), pozwalające na jednoznaczne rozróżnienie konkurencyjnych algorytmów predykcyjnych.
+* **Modele bazowe (benchmarki) oraz podziały próby:** neutralny grafit (`#6E7781`) stosowany jako linia przerywana lub punktowa.
+* **Przedziały ufności:** półprzezroczyste wstęgi niepewności (`alpha = 0.18`) w kolorze odpowiadającym linii predykcji, eliminujące nadmiar dodatkowych linii na wykresie.
+* **Macierze korelacji i mapy ciepła:** rozbieżna skala kolorystyczna od głębokiego brązu/burgundu (`#8C2D19` dla korelacji ujemnej $-1$), przez neutralną biel (`#F9FAFB` dla wartości $0$), po głęboki granat (`#1B365D` dla korelacji dodatniej $+1$).
+
+### Reguły projektowania wykresów
+
+Wszystkie wykresy w pracy wygenerowano w środowisku R (`ggplot2`) w formacie wektorowym (`cairo_pdf`), zgodnie z zasadą maksymalizacji stosunku informacji do ilości zużytego tuszu (*data-ink ratio*):
+
+1. **Hierarchia i styl linii:** Dane rzeczywiste prezentowane są linią ciągłą o większej grubości, natomiast prognozy i modele porównawcze — zróżnicowanym stylem linii (ciągła, przerywana, punktowa), co ułatwia ich identyfikację niezależnie od koloru.
+2. **Umiejscowienie legendy:** Dla szerokich wykresów szeregów czasowych legendę umieszczono w układzie poziomym nad obszarem kreślenia (pod podtytułem), dzięki czemu oś czasu wykorzystuje pełną szerokość kolumny tekstu. W przypadku map ciepła oraz wykresów strukturalnych legendę umieszczono po prawej stronie.
+3. **Czytelność osi i etykiet:** Zastosowano polski format zapisu liczb (przecinek jako separator dziesiętny oraz spacja jako separator tysięcy). W przypadku dłuższych etykiet kategorii na osi poziomej zastosowano delikatne nachylenie pod kątem $35^\circ$–$45^\circ$ (z wyrównaniem do prawej krawędzi) lub orientację poziomą słupków, unikając pionowego obrotu tekstu.
+4. **Redukcja szumu wizualnego i spójność podpisów:** Usunięto zbędne obramowania oraz pomocniczą siatkę podziałki, pozostawiając jedynie dyskretną siatkę główną (`#E5E7EB`) oraz wyraźną linię poziomu zerowego dla zwrotów i reszt modelu. Wewnątrz grafik zrezygnowano z dublowania głównych tytułów na rzecz formalnych podpisów rysunków generowanych automatycznie przez system LaTeX.
+```{r zsasady_dotyczące_wykresów}
+
+
+
+knitr::opts_chunk$set(
+  echo = FALSE,
+  warning = FALSE,
+  message = FALSE,
+  dev = "cairo_pdf",      # Grafika wektorowa - idealna ostrość w PDF
+  fig.align = "center",
+  fig.width = 6.5,        # Szerokość dopasowana do kolumny tekstu A4
+  fig.asp = 0.55,         # Złota proporcja dla wykresów finansowych
+  out.width = "100%"
+)
+
+library(ggplot2)
+library(scales)
+
+# Globalny styl dla wszystkich wykresów w pracy
+theme_praca <- function(base_size = 10, base_family = "EB Garamond") {
+  theme_minimal(base_size = base_size, base_family = base_family) %+replace%
+    theme(
+      # Siatka - zostawiamy tylko dyskretną siatkę główną
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(color = "#E5E7EB", linewidth = 0.35),
+      
+      # Osie i etykiety
+      axis.line.x      = element_line(color = "#9CA3AF", linewidth = 0.4),
+      axis.ticks.x     = element_line(color = "#9CA3AF", linewidth = 0.4),
+      axis.text        = element_text(color = "#374151", size = rel(0.9)),
+      axis.title       = element_text(color = "#111827", size = rel(0.95), face = "bold"),
+      
+      # Legenda na górze pod podtytułem (nie ściska wykresu na szerokość)
+      legend.position  = "top",
+      legend.justification = "left",
+      legend.title     = element_blank(),
+      legend.text      = element_text(size = rel(0.9), color = "#1F2937"),
+      legend.key.width = unit(1.2, "cm"),
+      
+      # Podtytuł i źródło (bez głównego title, bo podpis robi fig.cap w LaTeX)
+      plot.subtitle    = element_text(color = "#4B5563", size = rel(0.95), hjust = 0, margin = margin(b = 8)),
+      plot.caption     = element_text(color = "#6B7280", size = rel(0.8), hjust = 1, margin = margin(t = 6)),
+      plot.margin      = margin(t = 5, r = 10, b = 5, l = 5)
+    )
+}
+
+# Ustawienie jako domyślny motyw dla całego dokumentu
+theme_set(theme_praca())
+
+```
+
+```{r wykresy}
+
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(scales)
+
+# ==============================================================================
+# 1. DEFINICJA SYSTEMÓW KOLORYSTYCZNYCH (WARIANT A, B, C)
+# ==============================================================================
+
+palety <- list(
+  A = list(
+    nazwa = "Wariant A: Klasyczna elegancja finansowa (Navy & Gold)",
+    gl    = c("Rzeczywiste" = "#1B365D", "Model_1" = "#D97724", "Model_2" = "#2E6F40", "Model_3" = "#8C2D19", "Benchmark" = "#6E7781"),
+    k10   = c("#1B365D", "#D97724", "#2E6F40", "#8C2D19", "#4A7C9B", "#E5B25D", "#5C5346", "#6B8E23", "#8E6C8A", "#A3B18A"),
+    kor   = c("#8C2D19", "#F9FAFB", "#1B365D")
+  ),
+  B = list(
+    nazwa = "Wariant B: Naukowa Okabe-Ito (High Contrast)",
+    gl    = c("Rzeczywiste" = "#222222", "Model_1" = "#0072B2", "Model_2" = "#D55E00", "Model_3" = "#009E73", "Benchmark" = "#CC79A7"),
+    k10   = c("#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00", "#56B4E9", "#332288", "#882255", "#44AA99", "#999933"),
+    kor   = c("#D55E00", "#FFFFFF", "#0072B2")
+  ),
+  C = list(
+    nazwa = "Wariant C: Styl Financial Times (Burgund & Błękit)",
+    gl    = c("Rzeczywiste" = "#0D3B66", "Model_1" = "#9E2A2B", "Model_2" = "#335C67", "Model_3" = "#E09F3E", "Benchmark" = "#8D99AE"),
+    k10   = c("#0D3B66", "#9E2A2B", "#335C67", "#E09F3E", "#540B0E", "#6D8EA0", "#8D99AE", "#B56576", "#2B4141", "#D4A373"),
+    kor   = c("#9E2A2B", "#FDFBF7", "#0D3B66")
+  )
+)
+
+# ==============================================================================
+# 2. GLOBALNY MOTYW ZGODNY Z ZASADAMI WYDAWNICZYMI
+# ==============================================================================
+
+theme_praca <- function(base_size = 10) {
+  theme_minimal(base_size = base_size) %+replace%
+    theme(
+      panel.grid.minor     = element_blank(),
+      panel.grid.major     = element_line(color = "#E5E7EB", linewidth = 0.35),
+      axis.line.x          = element_line(color = "#9CA3AF", linewidth = 0.4),
+      axis.ticks.x         = element_line(color = "#9CA3AF", linewidth = 0.4),
+      axis.text            = element_text(color = "#374151", size = rel(0.9)),
+      axis.title           = element_text(color = "#111827", size = rel(0.95), face = "bold"),
+      legend.position      = "top",
+      legend.justification = "left",
+      legend.title         = element_blank(),
+      legend.text          = element_text(size = rel(0.9), color = "#1F2937"),
+      legend.key.width     = unit(1.1, "cm"),
+      plot.title           = element_blank(), # Tytuł główny robi fig.cap w LaTeX!
+      plot.subtitle        = element_text(color = "#4B5563", size = rel(0.95), hjust = 0, margin = margin(b = 8)),
+      plot.caption         = element_text(color = "#6B7280", size = rel(0.8), hjust = 1, margin = margin(t = 6)),
+      plot.margin          = margin(t = 5, r = 10, b = 5, l = 5)
+    )
+}
+
+# ==============================================================================
+# 3. GENEROWANIE SYNTETYCZNYCH DANYCH FINANSOWYCH
+# ==============================================================================
+set.seed(123)
+
+# Dane do STL (120 dni)
+t_stl <- 1:120
+trend_val  <- 100 + 0.35 * t_stl + 5 * sin(t_stl / 25)
+sezon_val  <- 4 * sin(2 * pi * t_stl / 14)
+reszty_val <- rnorm(120, 0, 1.2)
+df_stl <- data.frame(
+  t = rep(t_stl, 4),
+  Komponent = factor(
+    rep(c("Szereg oryginalny", "Trend", "Sezonowość", "Reszty"), each = 120),
+    levels = c("Szereg oryginalny", "Trend", "Sezonowość", "Reszty")
+  ),
+  Wartosc = c(trend_val + sezon_val + reszty_val, trend_val, sezon_val, reszty_val)
+)
+
+# Dane do Predykcji (80 dni)
+daty <- seq.Date(as.Date("2025-01-01"), by = "day", length.out = 80)
+y_real <- 100 + cumsum(rnorm(80, 0.15, 1.4))
+df_pred <- data.frame(
+  Data = daty,
+  Rzeczywiste = y_real,
+  LSTM   = c(rep(NA, 59), y_real[60], y_real[60] + cumsum(rnorm(20, 0.18, 0.9))),
+  ARIMA  = c(rep(NA, 59), y_real[60], y_real[60] + cumsum(rnorm(20, 0.10, 1.1))),
+  XGB    = c(rep(NA, 59), y_real[60], y_real[60] + cumsum(rnorm(20, 0.22, 1.2)))
+) %>%
+  mutate(
+    Low95  = ifelse(!is.na(LSTM), LSTM - seq(0, 5.5, length.out = 21), NA),
+    High95 = ifelse(!is.na(LSTM), LSTM + seq(0, 5.5, length.out = 21), NA)
+  )
+
+# Dane do Pie / Donut Chart (10 klas)
+df_pie <- data.frame(
+  Klasa  = factor(paste0("Klasa ", 1:10), levels = paste0("Klasa ", 1:10)),
+  Udzial = c(24, 17, 13, 11, 9, 8, 6, 5, 4, 3)
+)
+
+# Dane do Boxplota (błędy predykcji MAE dla 4 modeli)
+df_box <- data.frame(
+  Model = factor(rep(c("LSTM", "XGBoost", "ARIMA", "Naive"), each = 40),
+                 levels = c("LSTM", "XGBoost", "ARIMA", "Naive")),
+  Blad  = c(rnorm(40, 1.4, 0.35), rnorm(40, 1.7, 0.4), rnorm(40, 2.1, 0.5), rnorm(40, 2.8, 0.6))
+)
+
+# Dane do Stacked Barplota (struktura ekspozycji w 6 kwartałach)
+df_stack <- expand.grid(
+  Okres  = paste0("2025-Q", 1:6),
+  Sektor = c("Technologia", "Finanse", "Energia", "Surowce", "Obligacje")
+) %>%
+  mutate(Waga = runif(n(), 10, 40)) %>%
+  group_by(Okres) %>%
+  mutate(Procent = Waga / sum(Waga)) # Ułamek 0-1 pod scales::percent_format()
+
+# Dane do Heatmapy (macierz korelacji 5x5)
+mat_cor <- cor(matrix(rnorm(500), ncol = 5))
+colnames(mat_cor) <- rownames(mat_cor) <- c("Cena", "Wolumen", "RSI", "MACD", "VIX")
+df_cor <- as.data.frame(as.table(mat_cor))
+
+# ==============================================================================
+# 4. FUNKCJA DRUKUJĄCA 6 WYKRESÓW ZGODNYCH Z ZASADAMI EDYTORSKIMI
+# ==============================================================================
+
+pokaz_wykresy_dla_palety <- function(p) {
+  
+  # --- 1. DEKOMPOZYCJA STL (z linią zerową dla reszt i sezonowości) ---
+  kolory_stl <- c(
+    "Szereg oryginalny" = unname(p$gl["Rzeczywiste"]),
+    "Trend"             = unname(p$gl["Model_1"]),
+    "Sezonowość"        = unname(p$gl["Model_2"]),
+    "Reszty"            = unname(p$gl["Benchmark"])
+  )
+  
+  g_stl <- ggplot(df_stl, aes(x = t, y = Wartosc, color = Komponent)) +
+    geom_hline(data = subset(df_stl, Komponent %in% c("Sezonowość", "Reszty")),
+               aes(yintercept = 0), color = "#9CA3AF", linetype = "dashed", linewidth = 0.4) +
+    geom_line(linewidth = 0.8) +
+    facet_wrap(~Komponent, scales = "free_y", ncol = 1) +
+    scale_color_manual(values = kolory_stl) +
+    scale_y_continuous(labels = label_number(decimal.mark = ",", big.mark = " ")) +
+    labs(
+      subtitle = paste0("Dekompozycja addytywna STL | ", p$nazwa),
+      caption  = "Źródło: opracowanie własne.",
+      x = "Horyzont czasowy (dni sesyjne)", y = NULL
+    ) +
+    theme_praca() +
+    theme(
+      legend.position  = "none",
+      panel.grid.major.x = element_blank(),
+      strip.text       = element_text(face = "bold", hjust = 0, size = 9.5, color = "#111827")
+    )
+  print(g_stl)
+  
+  # --- 2. PREDYKCJA WIELOMODELOWA (legenda u góry, polskie daty i przecinki) ---
+# --- 2. PREDYKCJA WIELOMODELOWA (etykiety przypięte do górnego marginesu) ---
+  g_pred <- ggplot(df_pred, aes(x = Data)) +
+    geom_ribbon(aes(ymin = Low95, ymax = High95), fill = p$gl["Model_1"], alpha = 0.16, na.rm = TRUE) +
+    geom_vline(xintercept = as.numeric(daty[60]), linetype = "dotted", color = "#4B5563", linewidth = 0.7) +
+    
+    # Etykiety przypięte do górnej krawędzi (y = Inf) z odstępem pionowym (vjust = 1.4)
+    annotate("text", x = daty[59], y = Inf, label = "Próba ucząca",
+             hjust = 1, vjust = 1.4, size = 3.2, fontface = "italic", color = "#4B5563") +
+    annotate("text", x = daty[61], y = Inf, label = "Horyzont prognozy",
+             hjust = 0, vjust = 1.4, size = 3.2, fontface = "italic", color = "#4B5563") +
+    
+    geom_line(aes(y = Rzeczywiste, color = "Rzeczywiste"), linewidth = 0.85) +
+    geom_line(aes(y = LSTM, color = "LSTM (z 95% CI)"), linewidth = 0.85, na.rm = TRUE) +
+    geom_line(aes(y = ARIMA, color = "ARIMA"), linetype = "dashed", linewidth = 0.75, na.rm = TRUE) +
+    geom_line(aes(y = XGB, color = "XGBoost"), linetype = "dotdash", linewidth = 0.75, na.rm = TRUE) +
+    scale_color_manual(values = c(
+      "Rzeczywiste"     = unname(p$gl["Rzeczywiste"]),
+      "LSTM (z 95% CI)" = unname(p$gl["Model_1"]),
+      "ARIMA"           = unname(p$gl["Model_2"]),
+      "XGBoost"         = unname(p$gl["Model_3"])
+    )) +
+    scale_x_date(date_breaks = "2 weeks", date_labels = "%d.%m.%Y") +
+    # Dodatkowe 14% wolnej przestrzeni u góry osi Y (mult = c(dół, góra))
+    scale_y_continuous(
+      labels = label_number(decimal.mark = ",", big.mark = " ", suffix = " pkt"),
+      expand = expansion(mult = c(0.05, 0.14))
+    ) +
+    labs(
+      subtitle = paste0("Porównanie prognoz na zbiorze testowym | ", p$nazwa),
+      caption  = "Źródło: opracowanie własne.",
+      x = NULL, y = "Wartość indeksu"
+    ) +
+    theme_praca() +
+    theme(panel.grid.major.x = element_blank())
+  print(g_pred)
+  
+  # --- 3. PIE / DONUT CHART (legenda po prawej dla 10 klas) ---
+  g_pie <- ggplot(df_pie, aes(x = 2, y = Udzial, fill = Klasa)) +
+    geom_col(color = "white", linewidth = 0.8) +
+    coord_polar(theta = "y", start = 0) +
+    xlim(0.75, 2.5) +
+    scale_fill_manual(values = p$k10) +
+    geom_text(aes(label = ifelse(Udzial >= 5, paste0(Udzial, "%"), "")),
+              position = position_stack(vjust = 0.5), color = "white", fontface = "bold", size = 3.3) +
+    labs(
+      subtitle = paste0("Struktura alokacji kapitału w 10 klasach aktywów | ", p$nazwa),
+      caption  = "Uwaga: etykiety liczbowe ukryto dla udziałów poniżej 5%."
+    ) +
+    theme_void(base_size = 10) +
+    theme(
+      plot.subtitle   = element_text(color = "#4B5563", size = 9.5, hjust = 0, margin = margin(b = 8)),
+      plot.caption    = element_text(color = "#6B7280", size = 8, hjust = 1, margin = margin(t = 6)),
+      legend.position = "right",
+      legend.title    = element_blank(),
+      plot.margin     = margin(t = 5, r = 10, b = 5, l = 5)
+    )
+  print(g_pie)
+  
+  # --- 4. BOXPLOT (czysty, z polskim separatorem dziesiętnym) ---
+  g_box <- ggplot(df_box, aes(x = Model, y = Blad, fill = Model)) +
+    geom_boxplot(alpha = 0.88, outlier.size = 1.4, color = "#1F2937", linewidth = 0.45, width = 0.45) +
+    scale_fill_manual(values = unname(p$gl[c("Model_1", "Model_2", "Model_3", "Benchmark")])) +
+    scale_y_continuous(labels = label_number(decimal.mark = ",", big.mark = " ")) +
+    labs(
+      subtitle = paste0("Rozkład średniego błędu bezwzględnego (MAE) w próbach kroczących | ", p$nazwa),
+      caption  = "Źródło: opracowanie własne.",
+      x = NULL, y = "Błąd MAE (pkt)"
+    ) +
+    theme_praca() +
+    theme(
+      legend.position    = "none",
+      panel.grid.major.x = element_blank()
+    )
+  print(g_box)
+  
+  # --- 5. STACKED BARPLOT (legenda na górze, lekko nachylone etykiety 35 deg) ---
+  g_stack <- ggplot(df_stack, aes(x = Okres, y = Procent, fill = Sektor)) +
+    geom_col(color = "white", linewidth = 0.45, width = 0.55) +
+    scale_fill_manual(values = p$k10[1:5]) +
+    scale_y_continuous(labels = percent_format(decimal.mark = ","), expand = expansion(mult = c(0, 0.02))) +
+    labs(
+      subtitle = paste0("Zmiana struktury sektorowej portfela w kolejnych kwartałach | ", p$nazwa),
+      caption  = "Źródło: opracowanie własne.",
+      x = NULL, y = "Udział w portfelu"
+    ) +
+    theme_praca() +
+    theme(
+      panel.grid.major.x = element_blank(),
+      axis.text.x        = element_text(angle = 35, hjust = 1, vjust = 1) # Lekkie nachylenie 35 stopni
+    )
+  print(g_stack)
+  
+  # --- 6. HEATMAPA KORELACJI (idealny kwadrat coord_fixed, polskie przecinki) ---
+  g_heat <- ggplot(df_cor, aes(Var1, Var2, fill = Freq)) +
+    geom_tile(color = "white", linewidth = 1) +
+    geom_text(aes(label = format(round(Freq, 2), nsmall = 2, decimal.mark = ",")),
+              size = 3.5, fontface = "bold",
+              color = ifelse(abs(df_cor$Freq) > 0.5, "white", "#111827")) +
+    scale_fill_gradient2(
+      low = p$kor[1], mid = p$kor[2], high = p$kor[3],
+      midpoint = 0, limit = c(-1, 1),
+      labels = label_number(decimal.mark = ",")
+    ) +
+    coord_fixed() + # Wymusza idealnie kwadratowe kafelki
+    labs(
+      subtitle = paste0("Macierz współczynników korelacji liniowej Pearsona | ", p$nazwa),
+      caption  = "Źródło: opracowanie własne.",
+      x = NULL, y = NULL
+    ) +
+    theme_praca() +
+    theme(
+      panel.grid      = element_blank(),
+      axis.line.x     = element_blank(),
+      axis.ticks.x    = element_blank(),
+      axis.text.x     = element_text(angle = 35, hjust = 1, vjust = 1),
+      legend.position = "right",
+      legend.key.width = unit(0.4, "cm"),
+      legend.key.height = unit(1.2, "cm")
+    )
+  print(g_heat)
+}
+
+# ==============================================================================
+# 5. URUCHOMIENIE
+# ==============================================================================
+
+pokaz_wykresy_dla_palety(palety$A)
+pokaz_wykresy_dla_palety(palety$B)
+pokaz_wykresy_dla_palety(palety$C)
+```
+
