@@ -1,0 +1,1599 @@
+---
+title: "Projekt inżynierski"
+subtitle: "Prognozowanie hierarchicznych szeregów czasowych"
+author: "Kacper Szmigielski, Laura Nowak, Szymon Smoła"
+lang: pl
+linestretch: 1.15
+fontsize: 12pt
+geometry: a4paper, margin=24mm
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    latex_engine: xelatex
+    fig_crop: false
+params:
+  plik_danych: "../DANE/DANE_FINANSOWE.csv"
+  zrodlo: "tabela 9 raportu Monthly Treasury Statement Departamentu Skarbu USA (Fiscal Data API)"
+  etykieta_sumy: "Ogółem"
+  h_walidacji: null
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{float}
+  - \usepackage{fontspec}
+  - \setmainfont{EB Garamond}
+  - \usepackage{colortbl}
+  - \usepackage{xcolor}
+---
+
+```{r konfiguracja-wygladu, include = FALSE}
+
+# Ustawienia strony są w YAML (geometry, fontsize). Tu ustawiamy wykresy i tabele.
+wyglad <- list(
+  wykres = list(
+    szerokosc = 7, wysokosc = 3.25, tekst = 10,
+    kolumny = 2L, wiersze = 2L, zawijanie_etykiet = 32L,
+    punkty_prognoz = 0.75, grubosc_linii = 0.75, pozycja_legendy = "bottom"
+  ),
+  kolory = list(
+    tekst = "#213247", siatka = "#DEE6EE", panel = "#EDF3F8",
+    obserwacje = "#25374A", walidacja = "#E6F0F8", granica = "#627A94",
+    acf = "#7C8FA5", acf_roczne = "#007A77",
+    sezony = c("#C5D1DD", "#355A85"),
+    modele = c(Naive = "#9A4D00", SNaive = "#007A60", ETS = "#0067A5", ARIMA = "#85388F")
+  ),
+  linie_modeli = c(Naive = "dotted", SNaive = "longdash", ETS = "solid", ARIMA = "dotdash"),
+  tabela = list(booktabs = TRUE, miejsca_dziesietne = 1L, przecinek = ","),
+  historia_prognoz = 12L,
+  cykle_acf = 3L,
+  wysokosc_porownania_acf = 4.8,
+  kategorie_do_omowienia = c("Podatki od przedsiębiorstw", "Cła")
+)
+
+```
+
+```{r setup, include=FALSE}
+
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE, fig.align = "center",
+  fig.width = wyglad$wykres$szerokosc, fig.height = wyglad$wykres$wysokosc,
+  out.width = "100%", fig.pos = "H",
+  dev = "cairo_pdf", dev.args = list(family = "sans")
+)
+
+okres_sezonowy <- 12L # Roczny cykl obserwacji miesięcznych.
+h_walidacji <- params$h_walidacji
+if (is.null(h_walidacji)) h_walidacji <- okres_sezonowy
+
+dodatnia_liczba_calkowita <- function(x) {
+  is.numeric(x) && length(x) == 1L && is.finite(x) && x >= 1 && x == floor(x)
+}
+stopifnot(
+  "Horyzont walidacji musi być dodatnią liczbą całkowitą." =
+    dodatnia_liczba_calkowita(h_walidacji)
+)
+
+miesiac <- function(x) format(x, "%Y-%m")
+liczba <- function(x, digits = wyglad$tabela$miejsca_dziesietne) {
+  formatC(x, format = "f", digits = digits,
+          decimal.mark = wyglad$tabela$przecinek, big.mark = " ")
+}
+tabela_raportu <- function(x, podpis, ...) {
+  knitr::kable(x, caption = podpis, booktabs = wyglad$tabela$booktabs, ...)
+}
+```
+
+```{r paleta kolorów}
+
+paleta_finansowa <- c(
+  "Rzeczywiste"      = "#1B365D", # Głęboki granat (Oxford Navy)
+  "Predykcja"        = "#D97724", # Ciepły bursztyn / Ochra
+  "Benchmark"        = "#6E7781", # Grafitowy szary
+  "Model_Dodatkowy"  = "#2E6F40", # Stonowana zieleń leśna (opcjonalnie)
+  "Siatka_Tla"       = "#E5E7EB"  # Jasny popiel
+)
+
+
+paleta_A_10 <- c(
+  "#1B365D", # 1. Głęboki granat (Oxford Navy)
+  "#D97724", # 2. Ciepły bursztyn
+  "#2E6F40", # 3. Leśna zieleń
+  "#8C2D19", # 4. Ciemny terakotowy / rdzawy
+  "#4A7C9B", # 5. Stalowy błękit
+  "#E5B25D", # 6. Stonowane złoto / musztarda
+  "#5C5346", # 7. Ciepły grafit / taupe
+  "#6B8E23", # 8. Oliwkowy
+  "#8E6C8A", # 9. Przygaszona śliwka
+  "#A3B18A"  # 10. Szałwiowy
+)
+
+```
+
+```{r import bibliotek}
+
+
+library(dplyr)
+library(ggplot2)
+
+library(tibble)
+library(tsibble)
+
+library(fable)
+library(fabletools)
+
+library(knitr)
+library(kableExtra)
+
+library(stringr)
+
+
+```
+
+```{r utworzenie grup}
+
+
+# ============================================================
+# MAPOWANIE KATEGORII DO GRUP
+# ============================================================
+
+# Hierarchia obejmuje 7 kategorii bazowych.
+#
+# Kategorie przypisano do dwóch grup pośrednich
+# według kryterium ilościowego.
+#
+# Celem podziału jest uzyskanie dwóch agregatów
+# o zbliżonych sumach dochodów w przyjętym
+# okresie odniesienia.
+#
+# Przypisanie jest stałe i nie zmienia się
+# automatycznie podczas analizy.
+
+mapa_grup <- tibble::tribble(
+  ~kategoria,                         ~grupa,
+
+  "Podatki od osób fizycznych",        "Grupa 1",
+  "Akcyza",                            "Grupa 1",
+  "Podatki od spadków i darowizn",     "Grupa 1",
+
+  "Ubezpieczenia i emerytury",         "Grupa 2",
+  "Podatki od przedsiębiorstw",        "Grupa 2",
+  "Cła",                               "Grupa 2",
+  "Pozostałe dochody",                 "Grupa 2"
+)
+
+# Sprawdzenie poprawności definicji grup
+stopifnot(
+  nrow(mapa_grup) == 7L,
+  dplyr::n_distinct(mapa_grup$kategoria) == 7L,
+  dplyr::n_distinct(mapa_grup$grupa) == 2L
+)
+
+
+```
+
+```{r import oraz kontrola danych}
+
+# ============================================================
+# 1. WCZYTANIE DANYCH
+# ============================================================
+
+# Wczytujemy dane źródłowe z pliku CSV.
+# Kwoty są liczbami, a pozostałe pola tekstem.
+
+dane <- readr::read_csv(
+  params$plik_danych,
+  col_types = readr::cols(
+    usd = readr::col_double(),
+    .default = readr::col_character()
+  ),
+  locale = readr::locale(encoding = "UTF-8"),
+  show_col_types = FALSE
+)
+
+# Sprawdzenie wymaganych kolumn
+wymagane_kolumny <- c(
+  "data", "kod", "usd", "kategoria"
+)
+
+stopifnot(
+  "Brak wymaganych kolumn w CSV." =
+    all(wymagane_kolumny %in% names(dane)),
+
+  "Plik CSV jest pusty." =
+    nrow(dane) > 0L
+)
+
+# Sprawdzenie problemów wykrytych przez readr
+readr::stop_for_problems(dane)
+
+
+# ============================================================
+# 2. PRZYGOTOWANIE DAT I TEKSTU
+# ============================================================
+
+# Usuwamy zbędne spacje z nazw kategorii
+# i identyfikatorów kodów.
+
+dane <- dane |>
+  mutate(
+    kod = trimws(kod),
+    kategoria = trimws(kategoria)
+  )
+
+# Dopuszczamy formaty:
+# YYYY-MM
+# YYYY-MM-DD
+
+tekst_dat <- dane$data
+
+poprawny_format <- !anyNA(tekst_dat) &&
+  all(grepl(
+    "^\\d{4}-\\d{2}(-\\d{2})?$",
+    tekst_dat
+  ))
+
+if (!poprawny_format) {
+  stop("Niepoprawny format dat w CSV.")
+}
+
+# Uzupełniamy pierwszy dzień miesiąca,
+# jeżeli podano tylko rok i miesiąc.
+
+daty <- as.Date(
+  if_else(
+    nchar(tekst_dat) == 7L,
+    paste0(tekst_dat, "-01"),
+    tekst_dat
+  ),
+  format = "%Y-%m-%d"
+)
+
+if (anyNA(daty)) {
+  stop("W CSV wystepuja niepoprawne daty.")
+}
+
+# Konwersja na miesięczny indeks tsibble
+dane <- dane |>
+  mutate(data = tsibble::yearmonth(daty))
+
+
+# ============================================================
+# 3. WALIDACJA DANYCH ŹRÓDŁOWYCH
+# ============================================================
+
+# Każda obserwacja musi mieć kod i kategorię.
+
+stopifnot(
+  "Brak identyfikatora kodu lub kategorii." =
+    !anyNA(dane$kod) &&
+    !anyNA(dane$kategoria) &&
+    all(nzchar(dane$kod)) &&
+    all(nzchar(dane$kategoria))
+)
+
+# Każda para (miesiąc, kod) musi być unikalna.
+
+if (anyDuplicated(
+  select(dane, data, kod)
+) > 0L) {
+  stop("Wykryto powtarzajace sie pary miesiac-kod.")
+}
+
+# Jeden kod musi należeć do jednej kategorii.
+
+kody_kategorie <- dane |>
+  distinct(kod, kategoria)
+
+if (anyDuplicated(kody_kategorie$kod) > 0L) {
+  stop("Jeden kod jest przypisany do wielu kategorii.")
+}
+
+
+# ============================================================
+# 4. ODDZIELENIE KATEGORII OD SUMY OGÓŁEM
+# ============================================================
+
+# Kategorie bazowe są wykorzystywane
+# do budowania hierarchii.
+
+pozycje <- dane |>
+  filter(kategoria != params$etykieta_sumy)
+
+# Opublikowana suma ogółem służy wyłącznie
+# do sprawdzania zgodności danych.
+
+sumy_opublikowane <- dane |>
+  filter(kategoria == params$etykieta_sumy)
+
+if (nrow(pozycje) == 0L) {
+  stop("Brak kategorii bazowych w CSV.")
+}
+
+
+# ============================================================
+# 5. PRZYPISANIE KATEGORII DO GRUP
+# ============================================================
+
+# Usuwamy ewentualną kolumnę "grupa" z CSV.
+# Grupowanie pochodzi wyłącznie z mapa_grup.
+
+pozycje <- pozycje |>
+  select(-any_of("grupa")) |>
+  mutate(
+    kategoria = stringr::str_squish(kategoria)
+  )
+
+# Ujednolicamy nazwy kategorii w mapie grup.
+mapa_grup <- mapa_grup |>
+  mutate(
+    kategoria = stringr::str_squish(kategoria)
+  )
+
+
+# ------------------------------------------------------------
+# 5.1. Walidacja zgodności kategorii
+# ------------------------------------------------------------
+
+# Kategorie z CSV, których nie ma w mapie
+brak_mapowania <- setdiff(
+  unique(pozycje$kategoria),
+  mapa_grup$kategoria
+)
+
+# Kategorie z mapy, których nie ma w CSV
+brak_w_danych <- setdiff(
+  mapa_grup$kategoria,
+  unique(pozycje$kategoria)
+)
+
+# Sprawdzenie kompletności przypisania
+if (length(brak_mapowania) > 0L) {
+  stop(
+    "Nie wszystkie kategorie maja przypisana grupe: ",
+    paste(brak_mapowania, collapse = ", ")
+  )
+}
+
+if (length(brak_w_danych) > 0L) {
+  stop(
+    "Nie wszystkie kategorie z mapy wystepuja w CSV: ",
+    paste(brak_w_danych, collapse = ", ")
+  )
+}
+
+# Sprawdzenie unikalności kategorii w mapie
+if (anyDuplicated(mapa_grup$kategoria) > 0L) {
+  stop("Mapa grup zawiera powtarzajace sie kategorie.")
+}
+
+
+# ------------------------------------------------------------
+# 5.2. Dołączenie grup do danych
+# ------------------------------------------------------------
+
+pozycje <- pozycje |>
+  left_join(
+    mapa_grup,
+    by = "kategoria",
+    relationship = "many-to-one"
+  )
+
+
+# ------------------------------------------------------------
+# 5.3. Kontrola końcowa
+# ------------------------------------------------------------
+
+if (anyNA(pozycje$grupa)) {
+  stop("Po przypisaniu nadal wystepuja brakujace grupy.")
+}
+
+
+# ============================================================
+# 6. KONTROLA KOMPLETNOŚCI OBSERWACJI
+# ============================================================
+
+# Tworzymy pełną sekwencję miesięcy.
+
+miesiace <- seq(
+  min(dane$data),
+  max(dane$data),
+  by = 1
+)
+
+# Oczekujemy obserwacji każdego kodu
+# w każdym miesiącu.
+
+siatka_kodow <- tidyr::expand_grid(
+  data = miesiace,
+  kod = unique(pozycje$kod)
+)
+
+# Szukamy brakujących par miesiąc-kod.
+
+brakujace_wiersze <- anti_join(
+  siatka_kodow,
+  pozycje,
+  by = c("data", "kod")
+)
+
+# Kwoty muszą być skończonymi liczbami.
+
+niepoprawne_kwoty <- sum(
+  !is.finite(pozycje$usd)
+)
+
+if (
+  nrow(brakujace_wiersze) > 0L ||
+  niepoprawne_kwoty > 0L
+) {
+  stop(
+    sprintf(
+      paste(
+        "Dane wymagaja uzupelnienia:",
+        "%d brakujacych obserwacji,",
+        "%d niepoprawnych kwot."
+      ),
+      nrow(brakujace_wiersze),
+      niepoprawne_kwoty
+    )
+  )
+}
+
+
+# ============================================================
+# 7. AGREGACJA DO KATEGORII BAZOWYCH
+# ============================================================
+
+# Sumujemy wszystkie kody przypisane
+# do danej kategorii w danym miesiącu.
+#
+# Jednostka: miliardy USD.
+
+skladniki <- pozycje |>
+  group_by(data, grupa, kategoria) |>
+  summarise(
+    mld_usd = sum(usd) / 1e9,
+    .groups = "drop"
+  )
+
+
+# ============================================================
+# 8. KONSTRUKCJA HIERARCHICZNYCH SZEREGÓW
+# ============================================================
+
+# Tworzymy hierarchię:
+#
+# Poziom 0: Ogółem
+# Poziom 1: Grupa 1, Grupa 2
+# Poziom 2: Siedem kategorii
+#
+# aggregate_key() automatycznie
+# wyznacza odpowiednie agregaty.
+
+dane_ts <- skladniki |>
+  as_tsibble(
+    index = data,
+    key = c(grupa, kategoria)
+  ) |>
+  aggregate_key(
+    grupa / kategoria,
+    mld_usd = sum(mld_usd)
+  )
+
+
+# ============================================================
+# 9. IDENTYFIKACJA WĘZŁÓW HIERARCHII
+# ============================================================
+
+# Pobieramy wszystkie węzły
+# wygenerowanej hierarchii.
+
+wezly <- dane_ts |>
+  key_data() |>
+  select(-.rows) |>
+  mutate(
+
+    poziom = factor(
+      case_when(
+        is_aggregated(grupa) ~ "Ogółem",
+        is_aggregated(kategoria) ~ "Grupy",
+        TRUE ~ "Kategorie"
+      ),
+      levels = c(
+        "Ogółem",
+        "Grupy",
+        "Kategorie"
+      )
+    ),
+
+    wezel = case_when(
+      poziom == "Ogółem" ~ params$etykieta_sumy,
+      poziom == "Grupy" ~ as.character(grupa),
+      TRUE ~ as.character(kategoria)
+    )
+  ) |>
+  arrange(poziom, wezel) |>
+  mutate(
+    id_wezla = row_number()
+  )
+
+
+# ============================================================
+# 10. PORÓWNANIE Z OPUBLIKOWANĄ SUMĄ
+# ============================================================
+
+# Porównujemy dochody ogółem opublikowane
+# przez U.S. Treasury z sumą kodów bazowych.
+
+kontrola_sumy <- sumy_opublikowane |>
+  group_by(data) |>
+  summarise(
+    opublikowana = sum(usd),
+    .groups = "drop"
+  ) |>
+  filter(is.finite(opublikowana)) |>
+  inner_join(
+    pozycje |>
+      group_by(data) |>
+      summarise(
+        suma_kodow = sum(usd),
+        .groups = "drop"
+      ),
+    by = "data"
+  )
+
+
+# ============================================================
+# 11. PODSTAWOWE INFORMACJE O ZBIORZE
+# ============================================================
+
+n_grup <- n_distinct(mapa_grup$grupa)
+
+n_kategorii <- nrow(mapa_grup)
+
+n_miesiecy <- length(miesiace)
+
+n_szeregow <- nrow(wezly)
+
+opis_zrodla <- if (nzchar(params$zrodlo)) {
+  paste0(
+    "Źródłem danych jest ",
+    params$zrodlo,
+    "."
+  )
+} else {
+  ""
+}
+
+
+```
+
+```{r funkcja tworząca tabele (wraz z dokumentacją)}
+
+# ============================================================
+# tabela_praca() — spójne tabele do pracy inżynierskiej
+# Wymagane pakiety: knitr, kableExtra
+# Obsługiwane formaty: PDF (LaTeX) i HTML
+# Dokumentacja: DOKUMENTACJA_tabela_praca.md
+# ============================================================
+
+#' Tabela wyników do raportu naukowego (HTML / PDF)
+#'
+#' @param dane Ramka danych (data.frame lub tibble), co najmniej 1 wiersz i 1 kolumna.
+#' @param podpis Podpis wyświetlany nad tabelą.
+#' @param nazwy_kolumn Nazwy wyświetlane w nagłówku; domyślnie names(dane).
+#' @param zrodlo Tekst źródła, np. "Opracowanie własne."; NULL / "" ukrywa źródło.
+#' @param miejsca_dz Jedna liczba miejsc po przecinku lub wektor o długości ncol(dane).
+#' @param wyroznienie "brak", "wiersz", "kolumny", "wiersze".
+#' @param kryterium "min" lub "max"; dotyczy trybów "kolumny" i "wiersze".
+#' @param kolumny_oceny NULL (wszystkie kolumny liczbowe), nazwy lub numery
+#'   kolumn liczbowych porównywanych przy automatycznym wyróżnianiu.
+#' @param wyrozniony_wiersz Numer(y) wierszy do pogrubienia w trybie "wiersz".
+#'   Dla zgodności z wcześniejszą wersją podanie tego argumentu bez
+#'   `wyroznienie` automatycznie aktywuje tryb "wiersz".
+#' @param kolor_tekstu Kolor tekstu nagłówka (kod HEX).
+#' @param kolor_tla Kolor tła nagłówka (kod HEX).
+#' @param rozmiar_czcionki Wielkość czcionki tabeli.
+#' @param pelna_szerokosc Czy tabela ma zajmować pełną szerokość (głównie HTML).
+#' @param zatrzymaj_pozycje TRUE wymaga umieszczenia tabeli blisko jej kodu
+#'   w LaTeX (hold_position); FALSE pozwala LaTeX rozmieszczać tabele.
+#' @param format_wyjscia "auto", "html" lub "latex". W zwykłej sesji R
+#'   "auto" wybiera HTML; przy Knit do PDF — LaTeX.
+#'
+#' @return Obiekt tabeli kableExtra gotowy do wyświetlenia w raporcie.
+#' @details
+#'   * Automatycznie wyróżniane są wszystkie remisy (np. dwa równe minima).
+#'   * NA, NaN, Inf i -Inf nie biorą udziału w wyborze minimum/maksimum.
+#'   * Porównania wykonywane są na liczbach PRZED zaokrągleniem do wyświetlenia.
+#'   * W trybie "wiersze" porównywane wartości muszą mieć porównywalną skalę
+#'     i znaczenie. Np. MAE / RMSE (mld USD) i MASE nie powinny być tak
+#'     porównywane.
+#'
+#' @examples
+#' wyniki <- data.frame(
+#'   Model = c("Naive", "SNaive", "ETS", "ARIMA"),
+#'   MAE = c(10.42, 9.31, 8.75, 8.21),
+#'   RMSE = c(12.80, 12.01, 11.50, 10.95),
+#'   MASE = c(1.08, 0.91, 0.84, 0.80)
+#' )
+#' tabela_praca(wyniki, "Porównanie modeli", wyroznienie = "kolumny",
+#'              kryterium = "min")
+
+tabela_praca <- function(
+    dane,
+    podpis,
+    nazwy_kolumn = names(dane),
+    zrodlo = "Opracowanie własne.",
+    miejsca_dz = 2,
+    wyrozniony_wiersz = NULL,
+    kolor_tekstu = "#1B365D",
+    kolor_tla = "#EEF2F6",
+    rozmiar_czcionki = 10,
+    pelna_szerokosc = FALSE,
+    zatrzymaj_pozycje = FALSE,
+    wyroznienie = "brak",
+    kryterium = "min",
+    kolumny_oceny = NULL,
+    format_wyjscia = "auto"
+) {
+  # --- 1. Sprawdzenie danych i argumentów --------------------
+  if (!is.data.frame(dane) || nrow(dane) < 1L || ncol(dane) < 1L) {
+    stop("'dane' musi być niepustą ramką danych (data.frame/tibble).")
+  }
+  if (!is.character(podpis) || length(podpis) != 1L ||
+      is.na(podpis) || !nzchar(podpis)) {
+    stop("'podpis' musi być niepustym tekstem.")
+  }
+  if (!is.character(nazwy_kolumn) ||
+      length(nazwy_kolumn) != ncol(dane) || anyNA(nazwy_kolumn)) {
+    stop("'nazwy_kolumn' musi zawierać po jednej nazwie na kolumnę.")
+  }
+  if (!is.numeric(miejsca_dz) ||
+      !length(miejsca_dz) %in% c(1L, ncol(dane)) ||
+      any(!is.finite(miejsca_dz)) || any(miejsca_dz < 0) ||
+      any(miejsca_dz != floor(miejsca_dz))) {
+    stop("'miejsca_dz' to nieujemna liczba całkowita lub wektor długości ncol(dane).")
+  }
+
+  # Zgodność ze starszą funkcją:
+  # tabela_praca(..., wyrozniony_wiersz = 2) nadal pogrubia 2. wiersz.
+  if (missing(wyroznienie) && !is.null(wyrozniony_wiersz)) {
+    wyroznienie <- "wiersz"
+  }
+  wyroznienie <- match.arg(
+    wyroznienie, c("brak", "wiersz", "kolumny", "wiersze")
+  )
+  kryterium <- match.arg(kryterium, c("min", "max"))
+  format_wyjscia <- match.arg(format_wyjscia, c("auto", "html", "latex"))
+
+  if (format_wyjscia == "auto") {
+    format_wyjscia <- if (knitr::is_latex_output()) "latex" else "html"
+  }
+
+  if (wyroznienie == "wiersz") {
+    if (is.null(wyrozniony_wiersz) ||
+        !is.numeric(wyrozniony_wiersz) ||
+        length(wyrozniony_wiersz) < 1L ||
+        any(!is.finite(wyrozniony_wiersz)) ||
+        any(wyrozniony_wiersz != floor(wyrozniony_wiersz)) ||
+        any(wyrozniony_wiersz < 1L | wyrozniony_wiersz > nrow(dane))) {
+      stop("Dla 'wyroznienie = \"wiersz\"' podaj poprawny 'wyrozniony_wiersz'.")
+    }
+  }
+
+  # --- 2. Wybór kolumn porównywanych przy min / max ----------
+  porownuj <- wyroznienie %in% c("kolumny", "wiersze")
+  indeksy <- integer(0)
+
+  if (porownuj) {
+    if (is.null(kolumny_oceny)) {
+      indeksy <- which(vapply(dane, is.numeric, logical(1)))
+    } else if (is.character(kolumny_oceny)) {
+      indeksy <- match(kolumny_oceny, names(dane))
+    } else if (is.numeric(kolumny_oceny)) {
+      indeksy <- kolumny_oceny
+    } else {
+      stop("'kolumny_oceny' podaj jako nazwy lub numery kolumn liczbowych.")
+    }
+
+    if (!length(indeksy) || anyNA(indeksy) ||
+        any(!is.finite(indeksy)) || any(indeksy != floor(indeksy)) ||
+        any(indeksy < 1 | indeksy > ncol(dane)) ||
+        anyDuplicated(indeksy)) {
+      stop("'kolumny_oceny' musi wskazywać istniejące, różne kolumny.")
+    }
+    if (!all(vapply(dane[indeksy], is.numeric, logical(1)))) {
+      stop("Porównywać można wyłącznie kolumny liczbowe.")
+    }
+  }
+
+  # --- 3. Wyznaczenie komórek do pogrubienia -----------------
+  pogrub <- matrix(FALSE, nrow = nrow(dane), ncol = ncol(dane))
+
+  if (wyroznienie == "kolumny") {
+    for (j in indeksy) {
+      x <- dane[[j]]
+      dostepne <- which(is.finite(x))
+      if (!length(dostepne)) next
+      ekstremum <- if (kryterium == "min") {
+        min(x[dostepne])
+      } else {
+        max(x[dostepne])
+      }
+      pogrub[dostepne, j] <- x[dostepne] == ekstremum
+    }
+  }
+
+  if (wyroznienie == "wiersze") {
+    for (i in seq_len(nrow(dane))) {
+      wartosci <- vapply(indeksy, function(j) {
+        as.numeric(dane[[j]][i])
+      }, numeric(1))
+      dostepne <- which(is.finite(wartosci))
+      if (!length(dostepne)) next
+      ekstremum <- if (kryterium == "min") {
+        min(wartosci[dostepne])
+      } else {
+        max(wartosci[dostepne])
+      }
+      najlepsze <- dostepne[wartosci[dostepne] == ekstremum]
+      pogrub[i, indeksy[najlepsze]] <- TRUE
+    }
+  }
+
+  # --- 4. Tabela i jednolity styl ----------------------------
+  wyrownanie <- ifelse(
+    vapply(dane, is.numeric, logical(1)), "r", "l"
+  )
+  digits_vec <- rep(miejsca_dz, length.out = ncol(dane))
+
+  tab <- kableExtra::kbl(
+    dane,
+    format = format_wyjscia,
+    booktabs = TRUE,
+    row.names = FALSE,
+    caption = podpis,
+    col.names = nazwy_kolumn,
+    align = wyrownanie,
+    digits = digits_vec,
+    format.args = list(decimal.mark = ",", big.mark = " "),
+    escape = TRUE
+  )
+
+  tab <- kableExtra::kable_styling(
+    tab,
+    latex_options = if (zatrzymaj_pozycje) "hold_position" else "basic",
+    full_width = pelna_szerokosc,
+    font_size = rozmiar_czcionki,
+    position = "center"
+  )
+
+  tab <- kableExtra::row_spec(
+    tab, 0,
+    bold = TRUE,
+    color = kolor_tekstu,
+    background = kolor_tla
+  )
+
+  # --- 5. Pogrubienie wybranych wierszy / komórek -----------
+  if (wyroznienie == "wiersz") {
+    tab <- kableExtra::row_spec(tab, unique(wyrozniony_wiersz), bold = TRUE)
+  }
+
+  if (porownuj) {
+    for (j in indeksy) {
+      if (any(pogrub[, j])) {
+        # column_spec obsługuje logiczny wektor pogrubień po wierszach.
+        # Pozostawiamy escape=TRUE, więc specjalne znaki w danych są bezpieczne.
+        tab <- kableExtra::column_spec(tab, column = j, bold = pogrub[, j])
+      }
+    }
+  }
+
+  # --- 6. Źródło pod tabelą ---------------------------------
+  if (!is.null(zrodlo)) {
+    if (!is.character(zrodlo) || length(zrodlo) != 1L || is.na(zrodlo)) {
+      stop("'zrodlo' powinno być pojedynczym tekstem, NULL lub pustym tekstem.")
+    }
+    if (nzchar(zrodlo)) {
+      tab <- kableExtra::footnote(
+        tab,
+        general = zrodlo,
+        general_title = "Źródło: ",
+        footnote_as_chunk = TRUE,
+        threeparttable = (format_wyjscia == "latex"),
+        fixed_small_size = TRUE,
+        title_format = "italic"
+      )
+    }
+  }
+
+  return(tab)
+}
+
+
+```
+
+\newpage
+
+# Dane i ich hierarchia
+
+`r opis_zrodla` Analiza obejmuje okres od `r miesiac(min(miesiace))`
+do `r miesiac(max(miesiace))`. Obserwacje są miesięczne, a kwoty
+wyrażamy w miliardach USD.
+
+```{r charakterystyka}
+
+tabela_praca(
+  dane = tibble(
+    Wskaźnik = c(
+      "Miesiące",
+      "Wiersze w pliku źródłowym",
+      "Kody składowe",
+      "Kategorie bazowe",
+      "Obserwacje miesiąc × kategoria",
+      "Brakujące obserwacje składowe",
+      "Szeregi w hierarchii"
+    ),
+    Wartość = c(
+      n_miesiecy,
+      nrow(dane),
+      n_distinct(pozycje$kod),
+      n_kategorii,
+      nrow(skladniki),
+      nrow(brakujace_wiersze),
+      nrow(wezly)
+    )
+  ),
+  podpis = "Charakterystyka zbioru danych",
+  miejsca_dz = 0,
+  wyroznienie = "brak",
+  zrodlo = "Opracowanie własne"
+)
+
+```
+
+W każdym miesiącu sumujemy kody należące do tej samej kategorii.
+Suma wszystkich kategorii wyznacza szereg ogółem. Liczba grup
+wynosi `r n_grup`. Otrzymujemy drzewo
+*Ogółem* $\rightarrow$ *Grupy* $\rightarrow$ *Kategorie*.
+
+```{r sklad-grup}
+tabela_raportu(
+  mapa_grup |>
+    arrange(grupa, kategoria) |>
+    select(Grupa = grupa, Kategoria = kategoria),
+  "Przypisanie kategorii do grup", longtable = TRUE
+)
+```
+
+```{r hierarchia, echo=FALSE, fig.width=8, fig.height=5, fig.align="center", fig.cap="Struktura hierarchiczna miesięcznych dochodów federalnych USA. Udziały wyznaczono na podstawie okresu treningowego. Źródło: opracowanie własne na podstawie danych U.S. Treasury."}
+
+# ============================================================
+# 1. PRZYGOTOWANIE WĘZŁÓW DO WIZUALIZACJI
+# ============================================================
+
+# Korzystamy z istniejącej mapa_grup.
+# Nie definiujemy kategorii ponownie.
+#
+# Obiekt wezly z modelowania pozostaje bez zmian.
+#
+# Współrzędne y określają jedynie położenie
+# kategorii na schemacie.
+
+stopifnot(
+  nrow(mapa_grup) == 7L,
+  sum(mapa_grup$grupa == "Grupa 1") == 3L,
+  sum(mapa_grup$grupa == "Grupa 2") == 4L
+)
+
+wezly_schemat <- mapa_grup |>
+  mutate(
+    y = c(8, 7, 6, 4, 3, 2, 1),
+    etykieta = stringr::str_wrap(kategoria, width = 26)
+  )
+
+# ============================================================
+# 2. OBLICZENIE UDZIAŁÓW GRUP
+# ============================================================
+
+# Używamy tego samego horyzontu walidacji,
+# który wykorzystujemy w modelowaniu.
+
+daty <- sort(unique(skladniki$data))
+
+if (length(daty) <= h_walidacji) {
+  stop("Za mało obserwacji do wyznaczenia treningu.")
+}
+
+koniec_treningu <- daty[
+  length(daty) - h_walidacji
+]
+
+# Obiekt skladniki zawiera już kolumnę grupa.
+# Nie wykonujemy ponownego inner_join().
+
+udzialy_grup <- skladniki |>
+  filter(data <= koniec_treningu) |>
+  group_by(grupa) |>
+  summarise(
+    suma_dochodow = sum(mld_usd),
+    .groups = "drop"
+  )
+
+suma_grup <- sum(udzialy_grup$suma_dochodow)
+
+if (!is.finite(suma_grup) || suma_grup == 0) {
+  stop("Nie można obliczyć udziałów grup.")
+}
+
+udzialy_grup <- udzialy_grup |>
+  mutate(
+    udzial = 100 * suma_dochodow / suma_grup,
+    etykieta_grupy = paste0(
+      grupa, "\n",
+      formatC(
+        udzial,
+        format = "f",
+        digits = 1,
+        decimal.mark = ","
+      ),
+      "%"
+    )
+  )
+
+# ============================================================
+# 3. POZYCJE GRUP NA SCHEMACIE
+# ============================================================
+
+grupy_schemat <- wezly_schemat |>
+  group_by(grupa) |>
+  summarise(
+    y_min = min(y),
+    y_max = max(y),
+    y = (y_min + y_max) / 2,
+    .groups = "drop"
+  ) |>
+  left_join(
+    udzialy_grup,
+    by = "grupa"
+  )
+
+# Pozycja głównego agregatu
+srodek <- mean(grupy_schemat$y)
+
+# ============================================================
+# 4. KOLORY KATEGORII
+# ============================================================
+
+# Wykorzystujemy istniejącą paletę projektu.
+# Każda kategoria otrzymuje jeden stały kolor.
+
+paleta_hierarchii <- setNames(
+  paleta_A_10[1:7],
+  wezly_schemat$kategoria
+)
+
+# ============================================================
+# 5. WIZUALIZACJA HIERARCHII
+# ============================================================
+
+ggplot() +
+
+  # ----------------------------------------------------------
+  # Połączenia: OGÓŁEM -> GRUPY
+  # ----------------------------------------------------------
+
+  annotate(
+    "segment",
+    x = 0.8, xend = 1.9,
+    y = srodek, yend = srodek,
+    colour = "grey65"
+  ) +
+
+  annotate(
+    "segment",
+    x = 1.9, xend = 1.9,
+    y = min(grupy_schemat$y),
+    yend = max(grupy_schemat$y),
+    colour = "grey65"
+  ) +
+
+  geom_segment(
+    data = grupy_schemat,
+    aes(
+      x = 1.9, xend = 3.8,
+      y = y, yend = y
+    ),
+    colour = "grey65"
+  ) +
+
+  # ----------------------------------------------------------
+  # Połączenia: GRUPY -> KATEGORIE
+  # ----------------------------------------------------------
+
+  geom_segment(
+    data = grupy_schemat,
+    aes(
+      x = 3.8, xend = 3.8,
+      y = y_min, yend = y_max
+    ),
+    colour = "grey65"
+  ) +
+
+  geom_segment(
+    data = wezly_schemat,
+    aes(
+      x = 3.8, xend = 4.3,
+      y = y, yend = y
+    ),
+    colour = "grey65"
+  ) +
+
+  # ----------------------------------------------------------
+  # Poziom 0: DOCHODY OGÓŁEM
+  # ----------------------------------------------------------
+
+  annotate(
+    "label",
+    x = 0.8, y = srodek,
+    label = "Dochody\nogółem",
+    fill = "#1B365D",
+    colour = "white",
+    fontface = "bold",
+    size = 4
+  ) +
+
+  # ----------------------------------------------------------
+  # Poziom 1: GRUPY I ICH UDZIAŁY
+  # ----------------------------------------------------------
+
+  geom_label(
+    data = grupy_schemat,
+    aes(
+      x = 2.8,
+      y = y,
+      label = etykieta_grupy
+    ),
+    fill = "#EEF2F6",
+    colour = "#1B365D",
+    fontface = "bold",
+    size = 3.8,
+    label.padding = grid::unit(0.25, "lines")
+  ) +
+
+  # ----------------------------------------------------------
+  # Poziom 2: KATEGORIE BAZOWE
+  # ----------------------------------------------------------
+
+  geom_label(
+    data = wezly_schemat,
+    aes(
+      x = 4.3,
+      y = y,
+      label = etykieta,
+      colour = kategoria
+    ),
+    hjust = 0,
+    fill = "white",
+    fontface = "bold",
+    size = 3.8,
+    show.legend = FALSE
+  ) +
+
+  # ----------------------------------------------------------
+  # FORMATOWANIE
+  # ----------------------------------------------------------
+
+  scale_colour_manual(
+    values = paleta_hierarchii
+  ) +
+
+  coord_cartesian(
+    xlim = c(0, 7.5),
+    ylim = c(0.5, 8.5)
+  ) +
+
+  theme_void() +
+
+  theme(
+    plot.margin = margin(15, 15, 15, 15)
+  )
+
+```
+Grupa 1 odpowiada za 49,7% całkowitych wpływów, a Grupa 2 za pozostałe 50,3% w okresie treningowym.
+
+```{r zgodnosc-sumy, results='asis'}
+if (nrow(kontrola_sumy) > 0L) {
+  roznica <- max(abs(kontrola_sumy$opublikowana - kontrola_sumy$suma_kodow))
+  cat(sprintf(
+    "Opublikowaną sumę wykorzystujemy do kontroli danych. Dla %d porównanych miesięcy największa różnica bezwzględna wynosi %s USD.\n",
+    nrow(kontrola_sumy), liczba(roznica, 4)
+  ))
+}
+```
+
+\newpage
+
+# Podział chronologiczny
+
+```{r podzial}
+n_trening <- n_miesiecy - h_walidacji
+stopifnot(
+  "Po wydzieleniu walidacji trening musi obejmować co najmniej trzy cykle sezonowe." =
+    n_trening >= 3L * okres_sezonowy
+)
+
+daty_trening <- head(miesiace, n_trening)
+daty_walidacji <- tail(miesiace, h_walidacji)
+
+trening <- filter(dane_ts, data %in% daty_trening)
+walidacja <- filter(dane_ts, data %in% daty_walidacji)
+
+zakres <- function(x) paste(miesiac(min(x)), miesiac(max(x)), sep = " – ")
+tabela_raportu(
+  tibble(
+    Część = c("Trening", "Walidacja"),
+    Okres = c(zakres(daty_trening), zakres(daty_walidacji)),
+    Miesiące = c(n_trening, h_walidacji)
+  ),
+  "Chronologiczny podział obserwacji"
+)
+```
+
+Na walidację odkładamy ostatnie miesiące, domyślnie jeden pełny cykl
+roczny. Wszystkie wcześniejsze obserwacje tworzą zbiór treningowy.
+Stosujemy te same daty dla całej hierarchii. Na treningu badamy
+autokorelację i dopasowujemy modele. Obserwacje walidacyjne służą
+do wizualnego porównania z prognozami.
+
+
+```{r ustawienia-paneli}
+wezly <- wezly |>
+  mutate(
+    etykieta_panelu = if_else(poziom == "Kategorie",
+                             paste0(wezel, " (", as.character(grupa), ")"), wezel),
+    panel = factor(etykieta_panelu, levels = unique(etykieta_panelu))
+  )
+
+na_rysunek <- wyglad$wykres$kolumny * wyglad$wykres$wiersze
+zestawy_paneli <- split(wezly$id_wezla, ceiling(wezly$id_wezla / na_rysunek))
+wezly_omawiane <- wezly |>
+  filter(poziom == "Ogółem" |
+           (poziom == "Kategorie" & wezel %in% wyglad$kategorie_do_omowienia))
+
+panele_szeregow <- function(skale = "fixed") {
+  facet_wrap(vars(panel), scales = skale, ncol = wyglad$wykres$kolumny,
+             labeller = labeller(panel = label_wrap_gen(width = wyglad$wykres$zawijanie_etykiet)))
+}
+motyw_szeregow <- theme_minimal(base_size = wyglad$wykres$tekst) +
+  theme(
+    text = element_text(colour = wyglad$kolory$tekst),
+    axis.text = element_text(colour = wyglad$kolory$tekst),
+    panel.grid.major = element_line(colour = wyglad$kolory$siatka, linewidth = 0.25),
+    panel.grid.minor = element_blank(),
+    strip.background = element_rect(fill = wyglad$kolory$panel, colour = NA),
+    strip.text = element_text(face = "bold", colour = wyglad$kolory$tekst),
+    panel.spacing = grid::unit(0.85, "lines"),
+    legend.position = wyglad$wykres$pozycja_legendy
+  )
+
+z_panelami <- function(x) {
+  as_tibble(x) |>
+    inner_join(wezly, by = c("grupa", "kategoria")) |>
+    mutate(miesiac = as.Date(data))
+}
+pierwszy_miesiac_walidacji <- as.Date(min(daty_walidacji))
+tlo_walidacji <- annotate(
+  "rect", xmin = pierwszy_miesiac_walidacji, xmax = as.Date(Inf, origin = "1970-01-01"),
+  ymin = -Inf, ymax = Inf, fill = wyglad$kolory$walidacja
+)
+granica_walidacji <- geom_vline(
+  xintercept = pierwszy_miesiac_walidacji,
+  colour = wyglad$kolory$granica, linetype = "dashed", linewidth = 0.35
+)
+```
+
+## Udział kategorii w dochodach ogółem
+
+Sumujemy wpływy w pełnych latach kalendarzowych należących do treningu.
+Udział kategorii to jej suma podzielona przez sumę wpływów wszystkich
+kategorii w tym samym okresie. Tabela pokazuje, które kategorie mają
+największą wagę w agregacie.
+
+```{r udzialy-kategorii, results='asis'}
+pelne_lata <- tibble(data = daty_trening, rok = as.integer(format(daty_trening, "%Y"))) |>
+  group_by(rok) |>
+  filter(n() == okres_sezonowy) |>
+  ungroup()
+
+if (nrow(pelne_lata) > 0L) {
+  udzialy <- skladniki |>
+    semi_join(pelne_lata, by = "data") |>
+    group_by(grupa, kategoria) |>
+    summarise(lacznie = sum(mld_usd), .groups = "drop") |>
+    arrange(desc(lacznie))
+  suma_wplywow <- sum(udzialy$lacznie)
+  if (suma_wplywow != 0) {
+    udzialy <- mutate(udzialy, udzial = lacznie / suma_wplywow)
+    cat(tabela_raportu(
+      transmute(udzialy, Kategoria = kategoria, Grupa = grupa,
+                `Wpływy (mld USD)` = liczba(lacznie),
+                `Udział (%)` = liczba(100 * udzial)),
+      sprintf("Struktura wpływów w pełnych latach treningowych (%d-%d)",
+              min(pelne_lata$rok), max(pelne_lata$rok)),
+      align = c("l", "l", "r", "r"), longtable = TRUE
+    ), sep = "\n")
+    pierwsza <- slice_head(udzialy, n = 1L)
+    cat(sprintf("\n\nNajwiększy udział ma kategoria „%s” (%s%%).\n",
+                pierwsza$kategoria, liczba(100 * pierwsza$udzial)))
+  } else {
+    cat("Łączne wpływy wynoszą zero, więc udziałów procentowych nie można obliczyć.\n")
+  }
+}
+```
+
+# Przebiegi historyczne i sezonowość
+
+## Przebiegi miesięczne
+
+Zacienienie wskazuje okres walidacji. Każdy panel ma własną skalę
+pionową, dzięki czemu widać zmiany również w mniejszych kategoriach.
+
+```{r wykresy-historyczne, fig.cap="Miesięczne wpływy w poszczególnych węzłach hierarchii", fig.show='asis'}
+historia <- z_panelami(dane_ts)
+for (ids in zestawy_paneli) {
+  print(
+    ggplot(filter(historia, id_wezla %in% ids), aes(miesiac, mld_usd)) +
+      tlo_walidacji +
+      geom_line(colour = wyglad$kolory$obserwacje, linewidth = wyglad$wykres$grubosc_linii) +
+      granica_walidacji +
+      panele_szeregow("free_y") +
+      scale_x_date(date_labels = "%Y", breaks = scales::breaks_pretty(n = 4)) +
+      labs(x = NULL, y = "mld USD") +
+      motyw_szeregow
+  )
+}
+```
+
+## Wykresy sezonowe
+
+Każda linia przedstawia jeden pełny rok treningowy. Ciemniejsze
+linie odpowiadają późniejszym latom. Zestawienie tych samych miesięcy
+pokazuje, czy moment szczytu powtarza się mimo różnic w poziomie
+wpływów między latami.
+
+```{r wykresy-sezonowe, fig.cap="Wpływy według miesięcy kalendarzowych i pełnych lat treningowych", fig.show='asis'}
+sezony <- trening |>
+  z_panelami() |>
+  inner_join(pelne_lata, by = "data") |>
+  mutate(nr_miesiaca = as.integer(format(miesiac, "%m")))
+
+nazwy_miesiecy <- c("sty", "lut", "mar", "kwi", "maj", "cze",
+                   "lip", "sie", "wrz", "paź", "lis", "gru")
+for (ids in zestawy_paneli) {
+  print(
+    ggplot(filter(sezony, id_wezla %in% ids),
+           aes(nr_miesiaca, mld_usd, group = rok, colour = rok)) +
+      geom_line(linewidth = wyglad$wykres$grubosc_linii) +
+      panele_szeregow("free_y") +
+      scale_x_continuous(breaks = seq_len(okres_sezonowy), labels = nazwy_miesiecy) +
+      scale_colour_gradientn(colours = wyglad$kolory$sezony,
+                             breaks = range(sezony$rok), labels = scales::label_number(big.mark = "")) +
+      labs(x = NULL, y = "mld USD", colour = "Rok") +
+      motyw_szeregow
+  )
+}
+```
+
+```{r wnioski-sezonowe, results='asis'}
+szczyty_roku <- sezony |>
+  group_by(panel, id_wezla, rok) |>
+  filter(mld_usd == max(mld_usd)) |>
+  filter(n() == 1L) |>
+  ungroup() |>
+  count(panel, id_wezla, nr_miesiaca) |>
+  group_by(panel, id_wezla) |>
+  filter(n == max(n), n > 1L) |>
+  filter(n() == 1L) |>
+  ungroup() |>
+  inner_join(select(wezly_omawiane, id_wezla, wezel), by = "id_wezla")
+pelne_nazwy_miesiecy <- c("styczniu", "lutym", "marcu", "kwietniu", "maju", "czerwcu",
+                          "lipcu", "sierpniu", "wrześniu", "październiku", "listopadzie", "grudniu")
+for (i in seq_len(nrow(szczyty_roku))) {
+  w <- szczyty_roku[i, ]
+  cat(sprintf(
+    "W szeregu „%s” roczny szczyt najczęściej wypadał w %s (%d z %d pełnych lat treningowych).\n\n",
+    w$wezel, pelne_nazwy_miesiecy[w$nr_miesiaca], w$n, n_distinct(pelne_lata$rok)
+  ))
+}
+```
+
+# Autokorelacja szeregów treningowych
+
+Funkcja autokorelacji (ACF) pokazuje zależność między obserwacjami
+oddalonymi o określoną liczbę miesięcy. Wysokie dodatnie wartości
+dla małych opóźnień, które stopniowo maleją, mogą wskazywać na trend
+lub inną trwałą zależność w czasie. Lokalne maksima przy 12, 24
+i kolejnych wielokrotnościach 12 miesięcy sugerują sezonowość roczną.
+Oba wzorce mogą występować jednocześnie.
+[Hyndman i Athanasopoulos, sekcja o autokorelacji](https://otexts.com/fpp3/graphics.html#autocorrelation).
+
+```{r dane-acf}
+oblicz_acf <- function(y) {
+  lag_max <- min(wyglad$cykle_acf * okres_sezonowy, length(y) - 1L)
+  acf_y <- if (all(y == y[1L])) {
+    rep(NA_real_, lag_max)
+  } else {
+    as.numeric(stats::acf(y, lag.max = lag_max, plot = FALSE)$acf)[-1L]
+  }
+  tibble(
+    opoznienie = seq_len(lag_max),
+    acf = acf_y,
+    roczne = opoznienie %% okres_sezonowy == 0L,
+    granica = qnorm(0.975) / sqrt(length(y))
+  )
+}
+
+acf_trening <- z_panelami(trening) |>
+  arrange(data) |>
+  group_by(id_wezla) |>
+  group_modify(~ oblicz_acf(.x$mld_usd)) |>
+  ungroup() |>
+  left_join(wezly, by = "id_wezla")
+
+wykres_acf <- function(dane_acf) {
+  lag_max <- max(dane_acf$opoznienie)
+  granice <- distinct(dane_acf, panel, granica, across(any_of("panel_porownania")))
+  ggplot(dane_acf, aes(opoznienie, acf)) +
+    geom_hline(yintercept = 0, colour = wyglad$kolory$granica, linewidth = 0.3) +
+    geom_hline(data = granice, aes(yintercept = granica), colour = wyglad$kolory$granica,
+               linetype = "dashed", linewidth = 0.35) +
+    geom_hline(data = granice, aes(yintercept = -granica), colour = wyglad$kolory$granica,
+               linetype = "dashed", linewidth = 0.35) +
+    geom_segment(aes(xend = opoznienie, y = 0, yend = acf, colour = roczne),
+                 linewidth = wyglad$wykres$grubosc_linii, na.rm = TRUE) +
+    geom_text(data = filter(dane_acf, is.na(acf), opoznienie == 1L),
+              x = lag_max / 2, y = 0.32, label = "ACF nieokreślona", size = 3) +
+    scale_colour_manual(values = c("FALSE" = wyglad$kolory$acf,
+                                   "TRUE" = wyglad$kolory$acf_roczne), guide = "none") +
+    scale_x_continuous(breaks = seq(0, lag_max, by = okres_sezonowy / 2L),
+                       limits = c(0, lag_max)) +
+    scale_y_continuous(limits = c(-1, 1), breaks = seq(-1, 1, by = 0.5)) +
+    labs(x = "Opóźnienie (miesiące)", y = "ACF") +
+    motyw_szeregow
+}
+```
+
+Kolorem wyróżniamy wielokrotności roku. Przerywane linie poziome
+oznaczają przybliżone granice 95% dla pojedynczego opóźnienia przy
+założeniu białego szumu. Kształt całej funkcji pomaga w interpretacji,
+ponieważ pojedyncze przekroczenie może wystąpić przypadkowo.
+
+```{r wykresy-acf, fig.cap="Autokorelacja poziomów w poszczególnych węzłach hierarchii", fig.show='asis'}
+for (ids in zestawy_paneli) {
+  print(wykres_acf(filter(acf_trening, id_wezla %in% ids)) + panele_szeregow())
+}
+```
+
+```{r wnioski-acf, results='asis'}
+wzorce_acf <- acf_trening |>
+  group_by(id_wezla, wezel) |>
+  arrange(opoznienie, .by_group = TRUE) |>
+  summarise(
+    szczyty_roczne = sum(
+      roczne & acf > granica & acf > lag(acf, default = -Inf) & acf > lead(acf, default = -Inf),
+      na.rm = TRUE
+    ),
+    srednia_acf_krotka = mean(acf[opoznienie <= 3L]),
+    .groups = "drop"
+  )
+sezonowe <- filter(wzorce_acf, szczyty_roczne >= 2L)
+if (nrow(sezonowe) > 0L) {
+  cat(sprintf(
+    "Co najmniej dwa roczne maksima powyżej orientacyjnej granicy widać w szeregach %s.\n\n",
+    paste0("„", sezonowe$wezel, "”", collapse = ", ")
+  ))
+} else {
+  cat("W pokazanym zakresie żaden szereg nie ma dwóch dodatnich lokalnych maksimów powyżej orientacyjnej granicy przy opóźnieniach rocznych.\n\n")
+}
+
+najwieksza_acf <- wzorce_acf |>
+  filter(is.finite(srednia_acf_krotka)) |>
+  slice_max(srednia_acf_krotka, n = 1L, with_ties = FALSE)
+if (nrow(najwieksza_acf) > 0L) {
+  cat(sprintf(
+    "Najwyższą średnią ACF dla opóźnień od 1 do 3 miesięcy ma szereg „%s” (%s). Ewentualny trend warto rozpatrywać razem z przebiegiem szeregu w czasie.\n",
+    najwieksza_acf$wezel, liczba(najwieksza_acf$srednia_acf_krotka, 2L)
+  ))
+}
+```
+
+## Poziomy a zmiany miesięczne
+
+Pierwsza różnica to wpływy w danym miesiącu pomniejszone o wpływy
+z poprzedniego miesiąca. Dla dochodów ogółem i wybranych kategorii
+porównujemy ACF poziomów z ACF tych zmian. Jeśli po różnicowaniu
+krótkookresowa autokorelacja słabnie, zależność widoczna dla poziomów
+w mniejszym stopniu przenosi się na miesięczne zmiany.
+
+```{r acf-roznic, fig.height=wyglad$wysokosc_porownania_acf, fig.cap="Porównanie autokorelacji poziomów i pierwszych różnic"}
+acf_roznice <- z_panelami(trening) |>
+  filter(id_wezla %in% wezly_omawiane$id_wezla) |>
+  arrange(data) |>
+  group_by(id_wezla) |>
+  group_modify(~ oblicz_acf(diff(.x$mld_usd))) |>
+  ungroup() |>
+  left_join(wezly, by = "id_wezla") |>
+  mutate(seria = "Pierwsza różnica")
+
+acf_porownanie <- bind_rows(
+  acf_trening |> filter(id_wezla %in% wezly_omawiane$id_wezla) |> mutate(seria = "Poziom"),
+  acf_roznice
+) |>
+  arrange(id_wezla, match(seria, c("Poziom", "Pierwsza różnica"))) |>
+  mutate(panel_porownania = paste(wezel, seria, sep = " | "),
+         panel_porownania = factor(panel_porownania, levels = unique(panel_porownania)))
+
+wykres_acf(acf_porownanie) +
+  facet_wrap(vars(panel_porownania), ncol = 2L,
+             labeller = labeller(panel_porownania = label_wrap_gen(width = wyglad$wykres$zawijanie_etykiet)))
+```
+
+```{r komentarz-roznic, results='asis'}
+acf_najkrotsza <- acf_porownanie |>
+  filter(opoznienie == 1L, is.finite(acf)) |>
+  select(id_wezla, wezel, seria, acf) |>
+  tidyr::pivot_wider(names_from = seria, values_from = acf)
+if (all(c("Poziom", "Pierwsza różnica") %in% names(acf_najkrotsza))) {
+  for (i in seq_len(nrow(acf_najkrotsza))) {
+    w <- acf_najkrotsza[i, ]
+    if (all(is.finite(c(w$Poziom, w$`Pierwsza różnica`)))) {
+      kierunek <- if (abs(w$`Pierwsza różnica`) < abs(w$Poziom)) {
+        " Po różnicowaniu siła zależności przy tym opóźnieniu maleje."
+      } else if (abs(w$`Pierwsza różnica`) > abs(w$Poziom)) {
+        " Po różnicowaniu siła zależności przy tym opóźnieniu rośnie."
+      } else {
+        ""
+      }
+      cat(sprintf(
+        "Dla szeregu „%s” ACF przy opóźnieniu jednego miesiąca wynosi %s dla poziomów i %s dla pierwszych różnic.%s\n\n",
+        w$wezel, liczba(w$Poziom, 2L), liczba(w$`Pierwsza różnica`, 2L), kierunek
+      ))
+    }
+  }
+}
+```
+
+# Prognozy bazowe
+
+Każdą metodę dopasowujemy osobno do każdego węzła hierarchii.
+
+- **Naive** powtarza ostatnią zaobserwowaną wartość.
+- **SNaive** powtarza wartość z odpowiadającego miesiąca ostatniego dostępnego cyklu rocznego.
+- **ETS** dobiera składowe wygładzania wykładniczego na podstawie AICc.
+- **ARIMA** dobiera rzędy modelu z uwzględnieniem składowej sezonowej, wykorzystując AICc do porównania modeli kandydujących.
+
+[Dokumentacja ETS](https://fable.tidyverts.org/reference/ETS.html)
+oraz [dokumentacja ARIMA](https://fable.tidyverts.org/reference/ARIMA.html).
+
+```{r modele-i-prognozy}
+modele_bazowe <- trening |>
+  model(
+    Naive = NAIVE(mld_usd),
+    SNaive = SNAIVE(mld_usd ~ lag(okres_sezonowy)),
+    ETS = ETS(mld_usd),
+    ARIMA = ARIMA(mld_usd, approximation = FALSE),
+    .safely = FALSE
+  )
+
+# Prognoza otrzymuje klucze i daty walidacji. Kwoty są używane na wykresie.
+prognozy_bazowe <- forecast(modele_bazowe, new_data = select(walidacja, -mld_usd))
+stopifnot(
+  "Prognozy muszą pokrywać wszystkie miesiące i węzły dla każdego modelu." =
+    nrow(prognozy_bazowe) == nrow(walidacja) * length(mable_vars(modele_bazowe)) &&
+    all(is.finite(prognozy_bazowe$.mean))
+)
+```
+
+Każda ścieżka prognozy powstaje na koniec treningu. Ciemna linia
+pokazuje rzeczywiste wpływy. Zacienienie i pionowa kreska wskazują
+okres walidacji. Panele mają osobne skale pionowe.
+
+```{r wykresy-prognoz, fig.cap="Prognozy bazowe i obserwacje według węzłów hierarchii", fig.show='asis'}
+od_kiedy <- max(daty_trening) - (wyglad$historia_prognoz - 1L)
+obserwacje <- dane_ts |> filter(data >= od_kiedy) |> z_panelami()
+prognozy <- z_panelami(prognozy_bazowe)
+
+for (ids in zestawy_paneli) {
+  wybrane_prognozy <- filter(prognozy, id_wezla %in% ids)
+  p <- ggplot() +
+    tlo_walidacji +
+    granica_walidacji +
+    geom_line(data = filter(obserwacje, id_wezla %in% ids),
+              aes(miesiac, mld_usd), colour = wyglad$kolory$obserwacje,
+              linewidth = wyglad$wykres$grubosc_linii)
+  if (h_walidacji > 1L) {
+    p <- p + geom_line(data = wybrane_prognozy,
+                      aes(miesiac, .mean, colour = .model, linetype = .model),
+                      linewidth = wyglad$wykres$grubosc_linii)
+  }
+  print(
+    p +
+      geom_point(data = wybrane_prognozy, aes(miesiac, .mean, colour = .model),
+                 size = wyglad$wykres$punkty_prognoz) +
+      panele_szeregow("free_y") +
+      scale_colour_manual(values = wyglad$kolory$modele, breaks = names(wyglad$kolory$modele)) +
+      scale_linetype_manual(values = wyglad$linie_modeli, breaks = names(wyglad$kolory$modele)) +
+      scale_x_date(date_labels = "%Y-%m", breaks = scales::breaks_pretty(n = 4)) +
+      labs(x = NULL, y = "mld USD", colour = NULL, linetype = NULL) +
+      motyw_szeregow
+  )
+}
+```
+
+## Interpretacja pierwszych prognoz
+
+Dla wybranych szeregów porównujemy termin najwyższych wpływów
+oraz sprawdzamy, czy obserwacja w tym miesiącu mieści się pomiędzy
+najniższą i najwyższą prognozą punktową.
+
+```{r komentarz-prognoz, results='asis'}
+obserwowane_szczyty <- z_panelami(walidacja) |>
+  filter(id_wezla %in% wezly_omawiane$id_wezla) |>
+  group_by(id_wezla) |>
+  filter(mld_usd == max(mld_usd)) |>
+  select(id_wezla, data, wezel, mld_usd) |>
+  ungroup()
+
+szczyty_prognoz <- prognozy |>
+  filter(id_wezla %in% wezly_omawiane$id_wezla) |>
+  group_by(id_wezla, .model) |>
+  filter(.mean == max(.mean), n_distinct(.mean) > 1L) |>
+  ungroup()
+
+for (id in wezly_omawiane$id_wezla) {
+  szczyt <- filter(obserwowane_szczyty, id_wezla == id)
+  zgodne <- szczyty_prognoz |>
+    semi_join(szczyt, by = c("id_wezla", "data")) |>
+    pull(.model) |>
+    unique()
+  termin <- paste(miesiac(szczyt$data), collapse = ", ")
+  wspolny_termin <- if (length(zgodne) > 0L) {
+    paste("Szczyt w tym samym miesiącu pokazują modele", paste(zgodne, collapse = ", "))
+  } else {
+    "Żadna z prognoz o zmiennym przebiegu nie wskazuje szczytu w tym samym miesiącu"
+  }
+  cat(sprintf("**%s.** Najwyższe wpływy w walidacji odnotowano w %s (%s mld USD). ",
+              first(szczyt$wezel), termin, liczba(first(szczyt$mld_usd))))
+  if (h_walidacji > 1L && nrow(szczyt) < h_walidacji) {
+    cat(wspolny_termin, ". ", sep = "")
+  }
+  if (nrow(szczyt) == 1L) {
+    w_szczycie <- semi_join(prognozy, szczyt, by = c("id_wezla", "data"))
+    minimum <- min(w_szczycie$.mean)
+    maksimum <- max(w_szczycie$.mean)
+    polozenie <- case_when(
+      szczyt$mld_usd > maksimum ~ "Obserwacja przekracza wszystkie prognozy punktowe.",
+      szczyt$mld_usd < minimum ~ "Obserwacja jest poniżej wszystkich prognoz punktowych.",
+      TRUE ~ "Obserwacja mieści się w tym zakresie."
+    )
+    cat(sprintf("Prognozy na ten miesiąc wynoszą od %s do %s mld USD. %s",
+                liczba(minimum), liczba(maksimum), polozenie))
+  }
+  cat("\n\n")
+}
+```
+
+<!--
+Do dalszych etapów:
+- dane_ts, trening i walidacja zachowują klucze hierarchii fabletools.
+- modele_bazowe i prognozy_bazowe zawierają dopasowane modele i rozkłady prognoz.
+- acf_trening zawiera wartości ACF według klucza węzła i opóźnienia.
+- W parametrach YAML można zmienić plik_danych, zrodlo i h_walidacji.
+  Nowy CSV powinien zawierać regularne miesięczne dane w kolumnach
+  data, kod, usd i kategoria. Przy nowej hierarchii należy dodać kolumnę
+  grupa. Jeżeli plik zawiera opublikowaną sumę, jej kategorię określa
+  etykieta_sumy. Zmienna zrodlo pozwala zaktualizować opis pochodzenia.
+-->

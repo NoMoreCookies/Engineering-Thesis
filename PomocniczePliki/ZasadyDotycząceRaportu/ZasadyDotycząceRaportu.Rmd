@@ -11,6 +11,9 @@ linestretch: 1.15
 lang: pl
 header-includes:
   - \usepackage{ebgaramond}
+  - \usepackage{booktabs}
+  - \usepackage{colortbl}
+  - \usepackage{xcolor}
 ---
 
 ```{r setup, include=FALSE}
@@ -647,3 +650,200 @@ pokaz_wykresy_dla_palety(palety$B)
 pokaz_wykresy_dla_palety(palety$C)
 ```
 
+
+
+# Tabele
+```{r tabele}
+
+
+
+library(knitr)
+library(kableExtra)
+library(dplyr)
+
+# Przykładowe dane wynikowe modeli
+df_wyniki <- data.frame(
+  Model = c("LSTM (wielowarstwowy)", "XGBoost", "ARIMA(2,1,2)", "Random Walk (Benchmark)"),
+  RMSE  = c(1.84, 2.15, 2.48, 3.12),
+  MAE   = c(1.41, 1.69, 1.95, 2.54),
+  MAPE  = c(1.28, 1.54, 1.79, 2.31),
+  R2    = c(0.942, 0.918, 0.885, 0.810)
+)
+
+# ==============================================================================
+# WARIANT 1: Subtelny kolorowy nagłówek dopasowany do Wariantu A (#EEF2F6 + #1B365D)
+# ==============================================================================
+kbl(
+  df_wyniki,
+  format      = "latex",
+  booktabs    = TRUE,
+  caption     = "Porównanie miar dokładności prognoz na zbiorze testowym",
+  col.names   = c("Model predykcyjny", "RMSE (pkt)", "MAE (pkt)", "MAPE (%)", "Współczynnik R²"),
+  align       = c("l", "r", "r", "r", "r"),
+  digits      = c(0, 2, 2, 2, 3),
+  format.args = list(decimal.mark = ",", big.mark = " ")
+) %>%
+  kable_styling(
+    latex_options = c("hold_position"), # Zapobiega uciekaniu tabeli na koniec rozdziału
+    full_width    = FALSE,
+    font_size     = 10
+  ) %>%
+  row_spec(
+    0,                                  # Wiersz 0 = nagłówek tabeli
+    bold       = TRUE,
+    color      = "#1B365D",             # Kolor tekstu nagłówka (Oxford Navy z palety A)
+    background = "#EEF2F6"              # Bardzo jasny, elegancki odcień granatu
+  ) %>%
+  row_spec(
+    1,                                  # Opcjonalnie: lekkie pogrubienie najlepszego modelu
+    bold = TRUE
+  ) %>%
+  footnote(
+    general       = "Opracowanie własne na podstawie danych testowych (N = 250 obserwacji).",
+    general_title = "Źródło: ",
+    footnote_as_chunk = TRUE
+  )
+
+```
+
+
+```{r tabela1}
+
+
+
+
+tabela_praca <- function(
+    dane,
+    podpis,
+    nazwy_kolumn = names(dane),
+    zrodlo = "Opracowanie własne.",
+    miejsca_dz = 2,
+    wyrozniony_wiersz = NULL,
+    kolor_tekstu = "#1B365D",
+    kolor_tla = "#EEF2F6",
+    rozmiar_czcionki = 10,
+    pelna_szerokosc = FALSE,
+    zatrzymaj_pozycje = FALSE
+) {
+
+  # 1. Walidacja
+  stopifnot(is.data.frame(dane))
+
+  if (length(nazwy_kolumn) != ncol(dane)) {
+    stop("Liczba nazw musi odpowiadać liczbie kolumn.")
+  }
+
+  if (!length(miejsca_dz) %in% c(1, ncol(dane))) {
+    stop("Nieprawidłowa długość wektora miejsca_dz.")
+  }
+
+  if (!is.null(wyrozniony_wiersz)) {
+    if (anyNA(wyrozniony_wiersz) ||
+        any(!wyrozniony_wiersz %in% seq_len(nrow(dane)))) {
+      stop("Nieprawidłowy numer wyróżnionego wiersza.")
+    }
+  }
+
+  # 2. Format wyjściowy
+  latex <- knitr::is_latex_output()
+  format_wyjscia <- if (knitr::is_html_output()) {
+    "html"
+  } else {
+    "latex"
+  }
+
+  # 3. Wyrównanie
+  wyrownanie <- ifelse(
+    vapply(dane, is.numeric, logical(1)),
+    "r", "l"
+  )
+
+  # 4. Precyzja liczb
+  digits_vec <- rep(miejsca_dz, length.out = ncol(dane))
+
+  # 5. Pozycjonowanie LaTeX
+  opcje_latex <- if (latex && zatrzymaj_pozycje) {
+    "hold_position"
+  } else {
+    "basic"
+  }
+
+  # 6. Tabela
+  tab <- kableExtra::kbl(
+    dane,
+    format = format_wyjscia,
+    booktabs = TRUE,
+    row.names = FALSE,
+    caption = podpis,
+    col.names = nazwy_kolumn,
+    align = wyrownanie,
+    digits = digits_vec,
+    format.args = list(
+      decimal.mark = ",",
+      big.mark = " "
+    )
+  ) |>
+    kableExtra::kable_styling(
+      latex_options = opcje_latex,
+      full_width = pelna_szerokosc,
+      font_size = rozmiar_czcionki,
+      position = "center"
+    ) |>
+    kableExtra::row_spec(
+      0,
+      bold = TRUE,
+      color = kolor_tekstu,
+      background = kolor_tla
+    )
+
+  # 7. Wyróżnienie wybranych wierszy
+  if (!is.null(wyrozniony_wiersz)) {
+    tab <- tab |>
+      kableExtra::row_spec(
+        wyrozniony_wiersz,
+        bold = TRUE
+      )
+  }
+
+  # 8. Źródło
+  if (!is.null(zrodlo) &&
+      length(zrodlo) == 1 &&
+      nzchar(zrodlo)) {
+
+    tab <- tab |>
+      kableExtra::footnote(
+        general = zrodlo,
+        general_title = "Źródło: ",
+        footnote_as_chunk = TRUE,
+        threeparttable = latex,
+        fixed_small_size = TRUE,
+        title_format = "italic"
+      )
+  }
+
+  return(tab)
+}
+
+
+```
+
+
+```{r wyniki}
+
+wyniki_modeli <- data.frame(
+  Model = c("Naive", "SNaive", "ETS", "ARIMA"),
+  MAE = c(10.42, 9.31, 8.75, 8.21),
+  RMSE = c(12.80, 12.01, 11.50, 10.95),
+  MASE = c(1.08, 0.91, 0.84, 0.80)
+)
+
+tabela_praca(
+  dane = wyniki_modeli,
+  podpis = "Porównanie jakości prognoz dla podatków od osób fizycznych",
+  nazwy_kolumn = c("Model", "MAE", "RMSE", "MASE"),
+  miejsca_dz = c(0, 2, 2, 3),
+  wyrozniony_wiersz = which.min(wyniki_modeli$RMSE)
+)
+
+
+```
