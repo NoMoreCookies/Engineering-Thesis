@@ -3885,3 +3885,443 @@ Do dalszych etapów:
   etykieta_sumy. Zmienna zrodlo pozwala zaktualizować opis pochodzenia.
 -->
 ```
+
+
+# Uzgadnianie prognoz: Bottom-Up, Top-Down i Middle-Out
+
+Celem eksperymentu jest sprawdzenie, czy wymuszenie zgodności sum prognoz
+poprawia ich dokładność. Porównujemy prognozy bazowe, wyznaczane niezależnie
+dla każdego szeregu (BASE), z metodami Bottom-Up (BU), Top-Down (TD)
+i Middle-Out (MO).
+
+Dla TD i MO rozpatrujemy dwa sposoby wyznaczania udziałów służących do
+podziału prognozy rodzica między jego dzieci. Wariant H wykorzystuje
+udziały historyczne, obliczone jako stosunek sumy wartości dziecka do sumy
+wartości rodzica w okresie treningowym. Udziały te pozostają stałe w całym
+horyzoncie prognozy. Wariant P wykorzystuje udziały wyznaczane z prognoz
+bazowych dzieci, oddzielnie dla każdego prognozowanego miesiąca.
+
+Porównanie obejmuje modele Naive, SNaive, ETS i ARIMA na istniejącym
+podziale: trening `r zakres(daty_trening)`, walidacja `r zakres(daty_walidacji)`.
+Każdy model oceniono w sześciu konfiguracjach: BASE, BU, TD-H, TD-P, MO-H
+i MO-P, bez wcześniejszego wybierania modelu dla poszczególnych węzłów.
+
+Podstawę metodologiczną stanowi
+[Forecasting: Principles and Practice, rozdz. 11](https://otexts.com/fpp3/hierarchical-forecasting.html).
+Oznaczenie $\hat y$ odnosi się do prognozy bazowej, a $\tilde y$ do prognozy
+uzgodnionej. Indeks $h$ oznacza liczbę miesięcy od końca treningu: $h=1$
+odpowiada pierwszemu prognozowanemu miesiącowi, a $h=12$ — dwunastemu.
+
+```{r uzg-konfiguracja, include=FALSE}
+uzg_cfg <- list(
+  metody = c("BASE", "BU", "TD-H", "TD-P", "MO-H", "MO-P"),
+  styl = wyglad$wykres, tolerancja = 1e-8,
+  metryki_prezentowane = c("MASE", "RMSSE")
+)
+```
+
+```{r uzg-funkcje, include=FALSE}
+uzg_wektor <- function(bazowe, historyczne, meta, metoda) {
+  stopifnot(length(bazowe) == nrow(meta), length(historyczne) == nrow(meta),
+            all(is.finite(bazowe)), all(is.finite(historyczne)),
+            metoda %in% c("BU", "TD-H", "TD-P", "MO-H", "MO-P"))
+  root <- which(meta$poziom == "Ogółem")
+  groups <- which(meta$poziom == "Grupy")
+  stopifnot(length(root) == 1L, length(groups) > 0L)
+  out <- bazowe
+  udzial <- function(x) {
+    if (any(x < 0) || sum(x) <= .Machine$double.eps * max(1, sum(abs(x))))
+      stop("Nie można wyznaczyć nieujemnych udziałów: ujemna wartość lub zerowa suma.")
+    x / sum(x)
+  }
+  if (startsWith(metoda, "TD")) {
+    weights <- if (metoda == "TD-H") historyczne else bazowe
+    out[groups] <- bazowe[root] * udzial(weights[groups])
+  }
+  for (g in groups) {
+    kids <- which(meta$poziom == "Kategorie" & meta$grupa == meta$grupa[g])
+    stopifnot(length(kids) > 0L)
+    if (metoda == "BU") out[g] <- sum(bazowe[kids]) else {
+      weights <- if (endsWith(metoda, "H")) historyczne else bazowe
+      out[kids] <- out[g] * udzial(weights[kids])
+    }
+  }
+  out[root] <- sum(out[groups])
+  out
+}
+uzg_niespojnosc <- function(x, meta) {
+  groups <- which(meta$poziom == "Grupy")
+  errors <- x[meta$poziom == "Ogółem"] - sum(x[groups])
+  for (g in groups) errors <- c(errors, x[g] - sum(x[
+    meta$poziom == "Kategorie" & meta$grupa == meta$grupa[g]]))
+  max(abs(errors))
+}
+```
+
+```{r uzg-obliczenia, include=FALSE}
+uzg_meta <- wezly |> as_tibble() |>
+  transmute(id_wezla, poziom = as.character(poziom),
+            grupa = as.character(grupa), wezel) |>
+  arrange(match(poziom, c("Ogółem", "Grupy", "Kategorie")), grupa, id_wezla)
+uzg_train <- z_panelami(trening) |> as_tibble() |>
+  select(id_wezla, data, mld_usd)
+uzg_base <- z_panelami(prognozy_bazowe) |> as_tibble() |>
+  select(id_wezla, data, .model, .mean)
+uzg_actual <- z_panelami(walidacja) |> as_tibble() |>
+  select(id_wezla, data, mld_usd)
+uzg_expected <- tidyr::expand_grid(id_wezla = uzg_meta$id_wezla,
+  data = daty_walidacji, .model = mable_vars(modele_bazowe))
+stopifnot(!anyDuplicated(uzg_base[c("id_wezla", "data", ".model")]),
+  !anyDuplicated(uzg_actual[c("id_wezla", "data")]),
+  nrow(uzg_base) == nrow(uzg_expected),
+  nrow(anti_join(uzg_expected, uzg_base, by = c("id_wezla", "data", ".model"))) == 0L,
+  all(is.finite(uzg_base$.mean)), all(is.finite(uzg_actual$mld_usd)))
+uzg_hist <- uzg_train |> group_by(id_wezla) |>
+  summarise(suma = sum(mld_usd), .groups = "drop")
+uzg_hist <- uzg_hist$suma[match(uzg_meta$id_wezla, uzg_hist$id_wezla)]
+stopifnot(uzg_niespojnosc(uzg_hist, uzg_meta) <=
+            uzg_cfg$tolerancja * max(1, max(abs(uzg_hist))))
+
+uzg_parts <- list()
+uzg_i <- 0L
+for (uzg_model in mable_vars(modele_bazowe)) {
+  for (uzg_method in uzg_cfg$metody) {
+    for (uzg_t in seq_along(daty_walidacji)) {
+      uzg_date <- daty_walidacji[uzg_t]
+      uzg_b <- uzg_base |> filter(.model == uzg_model, data == uzg_date)
+      uzg_y <- uzg_b$.mean[match(uzg_meta$id_wezla, uzg_b$id_wezla)]
+      uzg_out <- if (uzg_method == "BASE") uzg_y else
+        uzg_wektor(uzg_y, uzg_hist, uzg_meta, uzg_method)
+      uzg_i <- uzg_i + 1L
+      uzg_parts[[uzg_i]] <- tibble(id_wezla = uzg_meta$id_wezla,
+        data = uzg_date, .model = uzg_model, metoda = uzg_method,
+        h = uzg_t, prognoza = uzg_out)
+    }
+  }
+}
+uzg_prognozy <- bind_rows(uzg_parts)
+stopifnot(nrow(uzg_prognozy) == nrow(uzg_base) * length(uzg_cfg$metody),
+          all(is.finite(uzg_prognozy$prognoza)))
+uzg_kontrola <- uzg_prognozy |> group_by(.model, metoda, data) |>
+  summarise(rozbieznosc = uzg_niespojnosc(
+    prognoza[match(uzg_meta$id_wezla, id_wezla)], uzg_meta),
+    skala = max(1, max(abs(prognoza))), .groups = "drop") |>
+  mutate(spojne = rozbieznosc <= uzg_cfg$tolerancja * skala)
+stopifnot(all(uzg_kontrola$spojne[uzg_kontrola$metoda != "BASE"]))
+
+uzg_skale <- uzg_train |> arrange(data) |> group_by(id_wezla) |>
+  summarise(s_mae = mean(abs(diff(mld_usd, lag = okres_sezonowy))),
+    s_rmse = sqrt(mean(diff(mld_usd, lag = okres_sezonowy)^2)), .groups = "drop")
+uzg_bledy <- uzg_prognozy |> left_join(uzg_actual, by = c("id_wezla", "data")) |>
+  mutate(blad = mld_usd - prognoza)
+stopifnot(all(is.finite(uzg_bledy$blad)))
+uzg_miary <- uzg_bledy |> group_by(id_wezla, .model, metoda) |>
+  summarise(MAE = mean(abs(blad)), RMSE = sqrt(mean(blad^2)), .groups = "drop") |>
+  left_join(uzg_skale, by = "id_wezla") |>
+  mutate(MASE = MAE / na_if(s_mae, 0), RMSSE = RMSE / na_if(s_rmse, 0)) |>
+  left_join(uzg_meta, by = "id_wezla")
+uzg_long <- uzg_miary |> tidyr::pivot_longer(c(MAE, RMSE, MASE, RMSSE),
+  names_to = "miara", values_to = "wartosc")
+uzg_reference <- uzg_long |> filter(metoda == "BASE") |>
+  select(id_wezla, .model, miara, baza = wartosc)
+uzg_long <- uzg_long |> left_join(uzg_reference, by = c("id_wezla", ".model", "miara")) |>
+  mutate(zmiana_proc = 100 * (wartosc - baza) / na_if(baza, 0))
+uzg_poziomy <- uzg_long |> group_by(.model, metoda, poziom, miara) |>
+  summarise(wartosc = mean(wartosc), liczba_wezlow = n(), .groups = "drop")
+uzg_ranking <- uzg_poziomy |> filter(miara %in% uzg_cfg$metryki_prezentowane) |>
+  group_by(.model, metoda, miara) |>
+  summarise(wartosc = mean(wartosc), .groups = "drop")
+```
+
+```{r uzg-prezentacja-funkcje, include=FALSE}
+uzg_cfg$kolory_modeli <- setNames(paleta[c(2,3,1,4)], c("Naive","SNaive","ETS","ARIMA"))
+uzg_cfg$linie_modeli <- wyglad$linie_modeli
+uzg_cfg$wybrane_kategorie <- 2L
+uzg_tabela_zmian <- function(metody) {
+  stopifnot(all(metody %in% uzg_cfg$metody))
+  uzg_ranking |> filter(metoda %in% metody) |>
+    semi_join(filter(uzg_roznice, max_zmiana > uzg_cfg$tolerancja), by=c(".model","metoda")) |>
+    left_join(uzg_ranking |> filter(metoda=="BASE") |>
+      select(.model, miara, baza=wartosc), by=c(".model","miara")) |>
+    mutate(zmiana=100*(wartosc-baza)/na_if(baza,0)) |>
+    select(Model=.model, Metoda=metoda, miara, wartosc, zmiana) |>
+    tidyr::pivot_wider(names_from=miara, values_from=c(wartosc,zmiana)) |>
+    select(Model, Metoda, MASE=wartosc_MASE, RMSSE=wartosc_RMSSE,
+      `MASE: zmiana (%)`=zmiana_MASE, `RMSSE: zmiana (%)`=zmiana_RMSSE)
+}
+uzg_wykres <- function(metody, ids) {
+  stopifnot(length(ids)>0L, all(ids %in% uzg_meta$id_wezla), all(metody %in% uzg_cfg$metody))
+  dane <- uzg_prognozy |> filter(metoda %in% metody, id_wezla %in% ids) |>
+    left_join(uzg_meta, by="id_wezla") |>
+    mutate(miesiac=as.Date(data), wezel=factor(wezel, levels=uzg_meta$wezel),
+      metoda=factor(metoda,levels=metody))
+  obs <- uzg_actual |> filter(id_wezla %in% ids) |> left_join(uzg_meta,by="id_wezla") |>
+    mutate(miesiac=as.Date(data),wezel=factor(wezel,levels=uzg_meta$wezel))
+  ggplot(dane,aes(miesiac,prognoza,colour=.model,linetype=.model)) +
+    geom_line(linewidth=uzg_cfg$styl$grubosc_linii) +
+    geom_point(data=obs,aes(miesiac,mld_usd),inherit.aes=FALSE,
+      colour=paleta_finansowa[["Rzeczywiste"]],size=uzg_cfg$styl$punkty_prognoz+0.3) +
+    facet_grid(wezel~metoda,scales="free_y") +
+    scale_colour_manual(values=uzg_cfg$kolory_modeli) +
+    scale_linetype_manual(values=uzg_cfg$linie_modeli) +
+    scale_x_date(date_breaks="3 months",date_labels="%Y-%m") +
+    scale_y_continuous(labels=scales::label_number(decimal.mark=",")) +
+    labs(x=NULL,y="mld USD",colour="Model bazowy",linetype="Model bazowy") +
+    motyw_szeregow + theme(axis.text.x=element_text(angle=45,hjust=1,size=8),
+      strip.text.y=element_text(size=8),legend.position=uzg_cfg$styl$pozycja_legendy)
+}
+uzg_komentarz <- function(metody) {
+  d <- uzg_long |> filter(metoda %in% metody, miara=="MASE",is.finite(zmiana_proc))
+  a <- d |> arrange(zmiana_proc) |> slice(1)
+  b <- d |> arrange(desc(zmiana_proc)) |> slice(1)
+  paste0("Największy spadek MASE pojedynczego szeregu odnotowano dla: ",
+    a$wezel," (",a$.model,", ",a$metoda,", ",liczba(a$zmiana_proc,1),"%). ",
+    "Największe pogorszenie: ",b$wezel," (",b$.model,", ",b$metoda,", +",liczba(b$zmiana_proc,1),
+    "%).\n\n")
+}
+
+uzg_roznice <- uzg_prognozy |> left_join(uzg_base,by=c("id_wezla","data",".model")) |>
+  group_by(.model,metoda) |> summarise(max_zmiana=max(abs(prognoza-.mean)),.groups="drop")
+uzg_wybor <- function(metody) {
+  uzg_long |> filter(metoda %in% metody,miara=="MASE",poziom=="Kategorie") |>
+    group_by(id_wezla) |> summarise(zmiana=max(abs(zmiana_proc)),.groups="drop") |>
+    arrange(desc(zmiana),id_wezla) |> slice_head(n=uzg_cfg$wybrane_kategorie) |> pull(id_wezla)
+}
+```
+
+## Spójność i ocena prognoz
+
+Spójność oznacza zgodność prognozy rodzica z sumą prognoz jego dzieci.
+Niezależne prognozy ARIMA i ETS nie spełniały tego warunku w żadnym miesiącu
+walidacji. Modele dopasowano osobno do każdego szeregu, bez narzucania
+ograniczeń sumowania. Ich parametry i wybrane postacie mogły się różnić
+między węzłami, dlatego prognoza agregatu nie musiała odpowiadać sumie
+prognoz jego składników. Nie jest to błąd obliczeń, lecz możliwy skutek
+niezależnego prognozowania.
+
+Maksymalna rozbieżność wyniosła odpowiednio
+`r liczba(max(uzg_kontrola$rozbieznosc[uzg_kontrola$.model == "ARIMA" & uzg_kontrola$metoda == "BASE"]), 2)`
+i `r liczba(max(uzg_kontrola$rozbieznosc[uzg_kontrola$.model == "ETS" & uzg_kontrola$metoda == "BASE"]), 2)`
+mld USD. Jest to największa bezwzględna różnica między prognozą rodzica
+a sumą prognoz jego dzieci, wyznaczona po wszystkich relacjach hierarchii
+i miesiącach walidacji. Nie jest to błąd względem rzeczywistych wpływów.
+
+Wszystkie prognozy BU, TD i MO spełniały warunki spójności w całym horyzoncie.
+Sumowanie w BU oraz podział według udziałów sumujących się do jedności
+w TD i MO zapewniają tę własność konstrukcyjnie.
+
+Prognozy bazowe Naive i SNaive również były spójne. Naive kopiuje ostatnią
+obserwację treningową, a SNaive — obserwację z odpowiedniego miesiąca
+poprzedniego roku. Przy wspólnych datach we wszystkich węzłach kopiowane
+wartości zachowują relacje sumowania. Z tego powodu BU nie zmienia tych
+prognoz. Warianty TD-P i MO-P również je odtwarzają: podział spójnej prognozy
+rodzica według udziałów jego prognozowanych dzieci zwraca wyjściowe prognozy
+dzieci. Wariant H może zmienić wynik, ponieważ narzuca przeciętną strukturę
+historyczną zamiast udziałów właściwych dla danego prognozowanego miesiąca.
+
+Dokładność oceniono za pomocą MASE i RMSSE; niższe wartości oznaczają
+mniejsze błędy. RMSSE silniej uwzględnia duże pomyłki. Mianowniki obu miar
+obliczono na treningu na podstawie różnic między obserwacjami oddalonymi
+o 12 miesięcy. Jest to sezonowa skala odniesienia odpowiadająca zasadzie
+prognozowania SNaive. Dzięki skalowaniu można porównywać błędy szeregów
+o różnych wielkościach.
+
+Wartość MASE lub RMSSE poniżej 1 oznacza błąd mniejszy od odpowiedniej skali
+treningowej. Aby stwierdzić przewagę nad SNaive na walidacji, należy
+bezpośrednio porównać wyniki obu metod na tych samych miesiącach.
+
+W tabelach najpierw uśredniono miary po węzłach każdego poziomu, a następnie
+po trzech poziomach z równymi wagami. Wynik obejmuje całą hierarchię, także
+poziomy zachowane przez daną metodę. Procentową zmianę błędu obliczono jako:
+
+\[
+\Delta M=100\left(\frac{M_{\mathrm{uzg}}}{M_{\mathrm{BASE}}}-1\right),
+\]
+
+gdzie $M_{\mathrm{uzg}}$ oznacza zagregowaną wartość MASE lub RMSSE po
+uzgodnieniu, a $M_{\mathrm{BASE}}$ — tę samą miarę dla prognoz bazowych
+tego samego modelu. Wartość ujemna oznacza poprawę, dodatnia pogorszenie,
+a zero brak zmiany.
+
+## Bottom-Up: od kategorii do ogółem
+
+BU wykorzystuje siedem prognoz kategorii i sumuje je w górę drzewa:
+$\tilde y_{g,h}=\sum_{i\in g}\hat y_{i,h}$,
+$\tilde y_{og,h}=\sum_g\tilde y_{g,h}$.
+Zachowuje szczegółowe prognozy, ale przenosi ich błędy do agregatów.
+Nie wykorzystuje bazowej prognozy ogółem ani grup jako ograniczenia sumy.
+
+```{r uzg-bu-tabela}
+tabela_praca(uzg_tabela_zmian("BU"),podpis="BU: konfiguracje zmieniające prognozy BASE",
+  miejsca_dz=3,zrodlo="Opracowanie własne. Zmiany procentowe dotyczą średnich miar całej hierarchii.")
+```
+
+Naive i SNaive pominięto w tabeli, bo BU nie zmienia ich prognoz.
+Na wykresie pozostają jako punkty odniesienia. Siedem kategorii pominięto
+na wykresie: BU zachowuje je z definicji, a ich przebiegi pokazano w sekcji bazowej.
+
+```{r uzg-bu-wniosek, results='asis'}
+cat(uzg_komentarz("BU"))
+```
+
+```{r uzg-bu-wykres, results='asis'}
+renderuj_rysunki_pracy(list(uzg_wykres("BU",uzg_meta$id_wezla[uzg_meta$poziom!="Kategorie"])),
+  podpis="BU: prognozy ogółem i grup według modeli bazowych",
+  zrodlo="Opracowanie własne. Punkty: obserwacje; linie: modele bazowe po BU.",
+  szerokosc=uzg_cfg$styl$szerokosc,wysokosc=5.5)
+```
+
+Sumowanie kategorii poprawia średnie
+MASE i RMSSE modelu ETS, natomiast pogarsza obie miary ARIMA. Spójność sama
+w sobie nie daje przewagi: istotna jest jakość prognoz poziomu wejściowego.
+
+## Top-Down: od ogółem do kategorii
+
+TD zachowuje prognozę ogółem i rozdziela ją kolejno na grupy i kategorie:
+$\tilde y_{i,h}=p_{i|r,h}\tilde y_{r,h}$, gdzie $r$ jest rodzicem węzła $i$.
+Wariant **H** stosuje stałe udziały
+$p_{i|r}=\sum_{t\in trening}y_{i,t}/\sum_{t\in trening}y_{r,t}$.
+To stosunek sum, nie średnia miesięcznych udziałów.
+Wariant **P** stosuje udziały zmienne dla każdego miesiąca prognozy:
+$p_{i|r,h}=\hat y_{i,h}/\sum_{j\in dzieci(r)}\hat y_{j,h}$.
+H jest prostym odniesieniem; P zachowuje więcej informacji o sezonowej strukturze
+prognoz. Jego skuteczność zależy jednak od jakości prognoz dzieci.
+
+```{r uzg-td-tabela}
+tabela_praca(uzg_tabela_zmian(c("TD-H","TD-P")),podpis="TD: konfiguracje zmieniające prognozy BASE",
+  miejsca_dz=3,zrodlo="Opracowanie własne. Minus: poprawa; plus: pogorszenie względem BASE tego samego modelu.")
+```
+
+TD-P z Naive i SNaive pominięto w tabeli jako identyczne z BASE.
+Ogółem pominięto na wykresie, ponieważ TD zachowuje jego prognozę bazową.
+Dla czytelności pokazujemy dwie kategorie o największej bezwzględnej
+procentowej zmianie MASE wśród modeli i wariantów TD. Są to przykłady skrajnych zmian, wybrane po ocenie walidacji.
+
+```{r uzg-td-wniosek, results='asis'}
+cat(uzg_komentarz(c("TD-H","TD-P")))
+```
+
+```{r uzg-td-wykres, results='asis'}
+renderuj_rysunki_pracy(list(uzg_wykres(c("TD-H","TD-P"),uzg_wybor(c("TD-H","TD-P")))),
+  podpis="TD: wybrane kategorie, udziały historyczne i prognozowane",
+  zrodlo="Opracowanie własne. Punkty: obserwacje; linie: modele bazowe po TD.",
+  szerokosc=uzg_cfg$styl$szerokosc,wysokosc=4.5)
+```
+
+```{r uzg-td-pozostale-wykresy, include=FALSE}
+# Podgląd w RStudio: print(uzg_td_pozostale[[1]]) lub wybór elementu po nazwie.
+# Do PDF: ustaw include=TRUE, dodaj results='asis' i odkomentuj renderowanie.
+uzg_td_ids <- setdiff(uzg_meta$id_wezla[uzg_meta$poziom != "Ogółem"],
+  uzg_wybor(c("TD-H", "TD-P")))
+uzg_td_meta <- uzg_meta[match(uzg_td_ids, uzg_meta$id_wezla), ]
+uzg_td_panele <- split(uzg_td_ids, ifelse(uzg_td_meta$poziom == "Kategorie",
+  uzg_td_meta$grupa, uzg_td_meta$poziom))
+uzg_td_pozostale <- lapply(uzg_td_panele, function(ids)
+  uzg_wykres(c("TD-H", "TD-P"), ids))
+names(uzg_td_pozostale) <- vapply(uzg_td_panele, function(ids)
+  paste(uzg_meta$wezel[match(ids, uzg_meta$id_wezla)], collapse=" / "), character(1))
+# renderuj_rysunki_pracy(uzg_td_pozostale, podpis="TD: pozostałe szeregi",
+#   zrodlo="Opracowanie własne. Punkty: obserwacje; linie: modele bazowe po TD.",
+#   szerokosc=uzg_cfg$styl$szerokosc, wysokosc=4.5)
+```
+
+
+Kolumny wykresu porównują warianty H i P przy wspólnej skali każdego
+szeregu. Wariant TD-H zmniejszył średnie MASE Naive o około 1,44%, a RMSSE
+o 6,33%. Dla SNaive te same miary wzrosły odpowiednio o około 20,16%
+i 28,05%. Stały podział historyczny pomógł więc prognozom niesezonowym,
+lecz pogorszył wyniki prognoz powtarzających wzorzec roczny.
+
+Możliwym wyjaśnieniem jest nieuwzględnianie przez stałe udziały miesięcznych
+zmian struktury wpływów. Eksperyment pokazuje jednak samo pogorszenie;
+nie pozwala jednoznacznie ustalić jego przyczyny.
+
+Dla ARIMA wariant TD-P zmniejszył średnie RMSSE o około 1,06%, przy wzroście
+MASE o około 0,09%. Oznacza to niewielką poprawę według miary silniej
+uwzględniającej duże błędy, bez poprawy średniego błędu bezwzględnego.
+Dla ETS oba warianty TD uzyskały wyższe MASE i RMSSE niż BASE.
+
+## Middle-Out: punkt wyjścia na poziomie grup
+
+MO zachowuje bazowe prognozy Grupy 1 i Grupy 2, sumuje je do prognozy
+szeregu dochodów ogółem i rozdziela w dół na kategorie:
+
+\[
+\tilde y_{og,h}=\sum_g\hat y_{g,h},
+\qquad
+\tilde y_{i,h}=p_{i|g,h}\hat y_{g,h}.
+\]
+
+Indeks $g$ oznacza grupę, a $i$ kategorię należącą do tej grupy. H i P
+oznaczają te same reguły udziałów co w TD, stosowane wewnątrz grup.
+Metoda łączy agregację prognoz grup z ich podziałem na kategorie.
+Zachowuje różnice między grupami, ale błędy prognoz grup wpływają również
+na prognozy ich kategorii.
+
+```{r uzg-mo-tabela}
+tabela_praca(uzg_tabela_zmian(c("MO-H","MO-P")),podpis="MO: konfiguracje zmieniające prognozy BASE",
+  miejsca_dz=3,zrodlo="Opracowanie własne. Minus: poprawa; plus: pogorszenie względem BASE tego samego modelu.")
+```
+
+MO-P z Naive i SNaive pominięto w tabeli jako identyczne z BASE.
+Na wykresie pominięto grupy, zachowane przez MO z definicji, oraz ogółem:
+oba warianty MO dają tam tę samą sumę prognoz grup. Pokazujemy dwie kategorie
+wybrane według największej bezwzględnej zmiany MASE wśród modeli i wariantów MO,
+analogicznie jak w TD. Wyniki tabel obejmują wszystkie szeregi.
+
+```{r uzg-mo-wniosek, results='asis'}
+cat(uzg_komentarz(c("MO-H","MO-P")))
+```
+
+```{r uzg-mo-wykres, results='asis'}
+renderuj_rysunki_pracy(list(uzg_wykres(c("MO-H","MO-P"),uzg_wybor(c("MO-H","MO-P")))),
+  podpis="MO: wybrane kategorie, udziały historyczne i prognozowane",
+  zrodlo="Opracowanie własne. Punkty: obserwacje; linie: modele bazowe po MO.",
+  szerokosc=uzg_cfg$styl$szerokosc,wysokosc=4.5)
+```
+
+```{r uzg-mo-pozostale-wykresy, include=FALSE}
+# Podgląd w RStudio: print(uzg_mo_pozostale[[1]]) lub wybór elementu po nazwie.
+# Do PDF: ustaw include=TRUE, dodaj results='asis' i odkomentuj renderowanie.
+uzg_mo_ids <- setdiff(uzg_meta$id_wezla[uzg_meta$poziom != "Grupy"],
+  uzg_wybor(c("MO-H", "MO-P")))
+uzg_mo_meta <- uzg_meta[match(uzg_mo_ids, uzg_meta$id_wezla), ]
+uzg_mo_panele <- split(uzg_mo_ids, ifelse(uzg_mo_meta$poziom == "Kategorie",
+  uzg_mo_meta$grupa, uzg_mo_meta$poziom))
+uzg_mo_pozostale <- lapply(uzg_mo_panele, function(ids)
+  uzg_wykres(c("MO-H", "MO-P"), ids))
+names(uzg_mo_pozostale) <- vapply(uzg_mo_panele, function(ids)
+  paste(uzg_meta$wezel[match(ids, uzg_meta$id_wezla)], collapse=" / "), character(1))
+# renderuj_rysunki_pracy(uzg_mo_pozostale, podpis="MO: pozostałe szeregi",
+#   zrodlo="Opracowanie własne. Punkty: obserwacje; linie: modele bazowe po MO.",
+#   szerokosc=uzg_cfg$styl$szerokosc, wysokosc=4.5)
+```
+
+
+Różnice między H i P wynikają ze sposobu wyznaczenia udziałów: prognoza grupy
+wejściowej pozostaje taka sama. ARIMA z MO-P uzyskuje niewielką poprawę
+średniego MASE i wyraźniejszą poprawę RMSSE. Nie jest to poprawa każdego szeregu.
+MO-H pogarsza MASE wszystkich modeli; w przypadku Naive jednocześnie poprawia
+RMSSE, co pokazuje zależność oceny od wagi dużych błędów.
+
+## Podsumowanie wyników
+
+Najniższe średnie MASE (około 1,226) i RMSSE (około 0,831) w całym
+eksperymencie uzyskał SNaive BASE. BU, TD-P i MO-P powtarzają jego prognozy,
+nie dając dodatkowej poprawy. Wynik ten jest zgodny z przydatnością rocznego
+wzorca sezonowego w badanym okresie, ale nie dowodzi uniwersalnej przewagi.
+
+Korzyści z uzgadniania zależały od modelu wejściowego. ETS poprawił wyniki
+po BU, ARIMA nieznacznie po MO-P, a Naive po TD-H. Stałe udziały w części
+konfiguracji pogorszyły dokładność, mimo zapewnienia zgodności sum.
+Przykładowo historyczny podział może zawyżać prognozę małej kategorii,
+jeżeli jej udział w danym miesiącu jest niższy niż udział z całego treningu.
+
+Dotychczasowe eksperymenty nie wykazały poprawy najlepszej konfiguracji
+bazowej przez badane uzgodnienia w tym okresie walidacji. Nie oznacza to
+jednak braku korzyści dla wszystkich modeli. Zapewnienie zgodności prognoz
+kategorii, grup i całości pozostaje odrębną korzyścią, która nie gwarantuje
+mniejszych błędów. Wyniki nie uzasadniają więc zastąpienia wszystkich
+prognoz bazowych jedną metodą uzgadniania. Wnioski dotyczą jednego okresu
+walidacji i dotychczas zbadanych metod; nie rozstrzygają o skuteczności
+uzgadniania dla innych danych i okresów.

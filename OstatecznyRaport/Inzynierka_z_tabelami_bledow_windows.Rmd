@@ -1,0 +1,4327 @@
+---
+title: "Projekt inżynierski"
+subtitle: "Prognozowanie hierarchicznych szeregów czasowych"
+author: "Kacper Szmigielski, Laura Nowak, Szymon Smoła"
+lang: pl
+linestretch: 1.15
+fontsize: 12pt
+geometry: a4paper, margin=24mm
+output:
+  pdf_document:
+    toc: true
+    toc_depth: 2
+    number_sections: true
+    latex_engine: xelatex
+    fig_crop: false
+params:
+  plik_danych: "../DANE/DANE_FINANSOWE.csv"
+  zrodlo: "tabela 9 raportu Monthly Treasury Statement Departamentu Skarbu USA (Fiscal Data API)"
+  etykieta_sumy: "Ogółem"
+  h_walidacji: null
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{float}
+  - \usepackage{fontspec}
+  - \setmainfont{EB Garamond}
+  - \usepackage{colortbl}
+  - \usepackage{xcolor}
+editor_options: 
+  markdown: 
+    wrap: 72
+---
+
+```{r konfiguracja-wygladu, include=FALSE}
+# KONFIGURACJA STYLU | wejście: ustawienia YAML; wynik: lista `wyglad`.
+# Zmiany barw, rozmiarów i parametrów prezentacji wprowadzamy w jednym miejscu.
+# Ten chunk nie tworzy wykresów ani tabel; przechowuje tylko ich ustawienia.
+
+# Ustawienia strony są w YAML (geometry, fontsize). Tu ustawiamy wykresy i tabele.
+wyglad <- list(
+  wykres = list(
+    szerokosc = 7, wysokosc = 3.25, tekst = 10,
+    kolumny = 2L, wiersze = 2L, zawijanie_etykiet = 32L,
+    punkty_prognoz = 0.75, grubosc_linii = 0.75, pozycja_legendy = "bottom"
+  ),
+  kolory = list(
+    tekst = "#213247", siatka = "#DEE6EE", panel = "#EDF3F8",
+    obserwacje = "#25374A", walidacja = "#E6F0F8", granica = "#627A94",
+    acf = "#7C8FA5", acf_roczne = "#007A77",
+    sezony = c("#C5D1DD", "#355A85"),
+    modele = c(Naive = "#9A4D00", SNaive = "#007A60", ETS = "#0067A5", ARIMA = "#85388F")
+  ),
+  linie_modeli = c(Naive = "dotted", SNaive = "longdash", ETS = "solid", ARIMA = "dotdash"),
+  tabela = list(booktabs = TRUE, miejsca_dziesietne = 1L, przecinek = ","),
+  historia_prognoz = 12L,
+  cykle_acf = 3L,
+  wysokosc_porownania_acf = 4.8,
+  kategorie_do_omowienia = c("Podatki od przedsiębiorstw", "Cła")
+)
+```
+
+```{r setup, include=FALSE}
+# PARAMETRY I FUNKCJE POMOCNICZE | wynik: opcje knitr, horyzont walidacji,
+# formatowanie dat/liczb i funkcja tabel, używana później w raporcie.
+# Nie wyświetlamy wyników: są potrzebne we wszystkich kolejnych częściach.
+
+knitr::opts_chunk$set(
+  echo = FALSE, message = FALSE, warning = FALSE, fig.align = "center",
+  fig.width = wyglad$wykres$szerokosc, fig.height = wyglad$wykres$wysokosc,
+  out.width = "100%", fig.pos = "H",
+  dev = "cairo_pdf", dev.args = list(family = "sans")
+)
+
+okres_sezonowy <- 12L # Roczny cykl obserwacji miesięcznych.
+h_walidacji <- params$h_walidacji
+if (is.null(h_walidacji)) h_walidacji <- okres_sezonowy
+
+dodatnia_liczba_calkowita <- function(x) {
+  is.numeric(x) && length(x) == 1L && is.finite(x) && x >= 1 && x == floor(x)
+}
+stopifnot(
+  "Horyzont walidacji musi być dodatnią liczbą całkowitą." =
+    dodatnia_liczba_calkowita(h_walidacji)
+)
+
+miesiac <- function(x) format(x, "%Y-%m")
+liczba <- function(x, digits = wyglad$tabela$miejsca_dziesietne) {
+  formatC(x, format = "f", digits = digits,
+          decimal.mark = wyglad$tabela$przecinek, big.mark = " ")
+}
+tabela_raportu <- function(x, podpis, ...) {
+  # Klasyczna tabela raportowa: pozostawiamy dotychczasową strukturę kable.
+  tab <- knitr::kable(x, caption = podpis, booktabs = wyglad$tabela$booktabs, ...)
+  # Zwykła tabela z podpisem staje się w LaTeX obiektem pływającym.
+  # HOLD_position stosuje [H], a więc blokuje jej wędrówkę na górę strony.
+  # longtable jest środowiskiem NIEpływającym: pomijamy opcję [H].
+  if (knitr::is_latex_output() && !isTRUE(list(...)$longtable)) {
+    tab <- kableExtra::kable_styling(tab, latex_options = "HOLD_position")
+  }
+  tab
+}
+```
+
+```{r paleta-kolorow, include=FALSE}
+# DEFINICJE BARW | palety wykresów i schematu hierarchii.
+# Nie powstaje tu wykres: wektory kolorów są wykorzystywane później.
+
+paleta_finansowa <- c(
+  "Rzeczywiste"      = "#1B365D", # Głęboki granat (Oxford Navy)
+  "Predykcja"        = "#D97724", # Ciepły bursztyn / Ochra
+  "Benchmark"        = "#6E7781", # Grafitowy szary
+  "Model_Dodatkowy"  = "#2E6F40", # Stonowana zieleń leśna (opcjonalnie)
+  "Siatka_Tla"       = "#E5E7EB"  # Jasny popiel
+)
+
+
+paleta <- c(
+  "#1B365D", # 1. Głęboki granat (Oxford Navy)
+  "#D97724", # 2. Ciepły bursztyn
+  "#2E6F40", # 3. Leśna zieleń
+  "#8C2D19", # 4. Ciemny terakotowy / rdzawy
+  "#4A7C9B", # 5. Stalowy błękit
+  "#E5B25D", # 6. Stonowane złoto / musztarda
+  "#5C5346", # 7. Ciepły grafit / taupe
+  "#6B8E23", # 8. Oliwkowy
+  "#8E6C8A", # 9. Przygaszona śliwka
+  "#A3B18A"  # 10. Szałwiowy
+)
+```
+
+```{r biblioteki, include=FALSE}
+# PAKIETY | wczytujemy narzędzia do przekształceń, szeregów, modeli,
+# wizualizacji, formatowania raportu i tabel.
+# Wszystkie poniższe chunki zakładają, że pakiety zostały załadowane.
+
+library(dplyr)
+library(ggplot2)
+
+library(tibble)
+library(tsibble)
+
+library(fable)
+library(fabletools)
+
+library(knitr)
+library(kableExtra)
+
+library(stringr)
+```
+
+```{r mapowanie-grup, include=FALSE}
+# STAŁA DEFINICJA HIERARCHII | 7 kategorii przypisujemy do dwóch grup.
+# Wejście: zdefiniowane tu nazwy; wynik: `mapa_grup` (kategoria, grupa).
+# CSV nie musi zawierać kolumny `grupa`; dołączenie nastąpi po imporcie.
+
+# ============================================================
+# MAPOWANIE KATEGORII DO GRUP
+# ============================================================
+
+# Hierarchia obejmuje 7 kategorii bazowych.
+#
+# Kategorie przypisano do dwóch grup pośrednich
+# według kryterium ilościowego.
+#
+# Celem podziału jest uzyskanie dwóch agregatów
+# o zbliżonych sumach dochodów w przyjętym
+# okresie odniesienia.
+#
+# Przypisanie jest stałe i nie zmienia się
+# automatycznie podczas analizy.
+
+mapa_grup <- tibble::tribble(
+  ~kategoria,                         ~grupa,
+
+  "Podatki od osób fizycznych",        "Grupa 1",
+  "Akcyza",                            "Grupa 1",
+  "Podatki od spadków i darowizn",     "Grupa 1",
+
+  "Ubezpieczenia i emerytury",         "Grupa 2",
+  "Podatki od przedsiębiorstw",        "Grupa 2",
+  "Cła",                               "Grupa 2",
+  "Pozostałe dochody",                 "Grupa 2"
+)
+
+# Sprawdzenie poprawności definicji grup
+stopifnot(
+  nrow(mapa_grup) == 7L,
+  dplyr::n_distinct(mapa_grup$kategoria) == 7L,
+  dplyr::n_distinct(mapa_grup$grupa) == 2L
+)
+```
+
+```{r dane-01-wczytanie, include=FALSE}
+# IMPORT CSV | wczytujemy daty/kody/kategorie jako tekst i kwoty jako liczby.
+# Sprawdzamy istnienie obowiązkowych pól, niepustość oraz problemy parsowania.
+
+# ============================================================
+# 1. WCZYTANIE DANYCH
+# ============================================================
+
+# Wczytujemy dane źródłowe z pliku CSV.
+# Kwoty są liczbami, a pozostałe pola tekstem.
+
+dane <- readr::read_csv(
+  params$plik_danych,
+  col_types = readr::cols(
+    usd = readr::col_double(),
+    .default = readr::col_character()
+  ),
+  locale = readr::locale(encoding = "UTF-8"),
+  show_col_types = FALSE
+)
+
+# Sprawdzenie wymaganych kolumn
+wymagane_kolumny <- c(
+  "data", "kod", "usd", "kategoria"
+)
+
+stopifnot(
+  "Brak wymaganych kolumn w CSV." =
+    all(wymagane_kolumny %in% names(dane)),
+
+  "Plik CSV jest pusty." =
+    nrow(dane) > 0L
+)
+
+# Sprawdzenie problemów wykrytych przez readr
+readr::stop_for_problems(dane)
+```
+
+```{r dane-02-daty-i-tekst, include=FALSE}
+# NORMALIZACJA | obcinamy spacje i zmieniamy daty YYYY-MM / YYYY-MM-DD
+# na indeks miesięczny `yearmonth`, wymagany przez `tsibble`.
+
+# ============================================================
+# 2. PRZYGOTOWANIE DAT I TEKSTU
+# ============================================================
+
+# Usuwamy zbędne spacje z nazw kategorii
+# i identyfikatorów kodów.
+
+dane <- dane |>
+  mutate(
+    kod = trimws(kod),
+    kategoria = trimws(kategoria)
+  )
+
+# Dopuszczamy formaty:
+# YYYY-MM
+# YYYY-MM-DD
+
+tekst_dat <- dane$data
+
+poprawny_format <- !anyNA(tekst_dat) &&
+  all(grepl(
+    "^\\d{4}-\\d{2}(-\\d{2})?$",
+    tekst_dat
+  ))
+
+if (!poprawny_format) {
+  stop("Niepoprawny format dat w CSV.")
+}
+
+# Uzupełniamy pierwszy dzień miesiąca,
+# jeżeli podano tylko rok i miesiąc.
+
+daty <- as.Date(
+  if_else(
+    nchar(tekst_dat) == 7L,
+    paste0(tekst_dat, "-01"),
+    tekst_dat
+  ),
+  format = "%Y-%m-%d"
+)
+
+if (anyNA(daty)) {
+  stop("W CSV wystepuja niepoprawne daty.")
+}
+
+# Konwersja na miesięczny indeks tsibble
+dane <- dane |>
+  mutate(data = tsibble::yearmonth(daty))
+```
+
+```{r dane-03-walidacja, include=FALSE}
+# WALIDACJA IDENTYFIKATORÓW | kontrolujemy brakujące opisy, duplikaty
+# (data, kod) i jednoznaczność przypisania kodu do kategorii.
+
+# ============================================================
+# 3. WALIDACJA DANYCH ŹRÓDŁOWYCH
+# ============================================================
+
+# Każda obserwacja musi mieć kod i kategorię.
+
+stopifnot(
+  "Brak identyfikatora kodu lub kategorii." =
+    !anyNA(dane$kod) &&
+    !anyNA(dane$kategoria) &&
+    all(nzchar(dane$kod)) &&
+    all(nzchar(dane$kategoria))
+)
+
+# Każda para (miesiąc, kod) musi być unikalna.
+
+if (anyDuplicated(
+  select(dane, data, kod)
+) > 0L) {
+  stop("Wykryto powtarzajace sie pary miesiac-kod.")
+}
+
+# Jeden kod musi należeć do jednej kategorii.
+
+kody_kategorie <- dane |>
+  distinct(kod, kategoria)
+
+if (anyDuplicated(kody_kategorie$kod) > 0L) {
+  stop("Jeden kod jest przypisany do wielu kategorii.")
+}
+```
+
+```{r dane-04-pozycje-i-suma, include=FALSE}
+# ROZDZIELENIE DANYCH | `pozycje` przechowują składowe do modelowania,
+# `sumy_opublikowane` — wartość agregatu z CSV do niezależnej kontroli.
+
+# ============================================================
+# 4. ODDZIELENIE KATEGORII OD SUMY OGÓŁEM
+# ============================================================
+
+# Kategorie bazowe są wykorzystywane
+# do budowania hierarchii.
+
+pozycje <- dane |>
+  filter(kategoria != params$etykieta_sumy)
+
+# Opublikowana suma ogółem służy wyłącznie
+# do sprawdzania zgodności danych.
+
+sumy_opublikowane <- dane |>
+  filter(kategoria == params$etykieta_sumy)
+
+if (nrow(pozycje) == 0L) {
+  stop("Brak kategorii bazowych w CSV.")
+}
+```
+
+```{r dane-05-mapowanie, include=FALSE}
+# MAPOWANIE | kojarzymy każdą kategorię CSV z grupą przez `mapa_grup`.
+# Odchylenia nazw i niejednoznaczności przerywają generowanie raportu.
+
+# ============================================================
+# 5. PRZYPISANIE KATEGORII DO GRUP
+# ============================================================
+
+# Usuwamy ewentualną kolumnę "grupa" z CSV.
+# Grupowanie pochodzi wyłącznie z mapa_grup.
+
+pozycje <- pozycje |>
+  select(-any_of("grupa")) |>
+  mutate(
+    kategoria = stringr::str_squish(kategoria)
+  )
+
+# Ujednolicamy nazwy kategorii w mapie grup.
+mapa_grup <- mapa_grup |>
+  mutate(
+    kategoria = stringr::str_squish(kategoria)
+  )
+
+
+# ------------------------------------------------------------
+# 5.1. Walidacja zgodności kategorii
+# ------------------------------------------------------------
+
+# Kategorie z CSV, których nie ma w mapie
+brak_mapowania <- setdiff(
+  unique(pozycje$kategoria),
+  mapa_grup$kategoria
+)
+
+# Kategorie z mapy, których nie ma w CSV
+brak_w_danych <- setdiff(
+  mapa_grup$kategoria,
+  unique(pozycje$kategoria)
+)
+
+# Sprawdzenie kompletności przypisania
+if (length(brak_mapowania) > 0L) {
+  stop(
+    "Nie wszystkie kategorie maja przypisana grupe: ",
+    paste(brak_mapowania, collapse = ", ")
+  )
+}
+
+if (length(brak_w_danych) > 0L) {
+  stop(
+    "Nie wszystkie kategorie z mapy wystepuja w CSV: ",
+    paste(brak_w_danych, collapse = ", ")
+  )
+}
+
+# Sprawdzenie unikalności kategorii w mapie
+if (anyDuplicated(mapa_grup$kategoria) > 0L) {
+  stop("Mapa grup zawiera powtarzajace sie kategorie.")
+}
+
+
+# ------------------------------------------------------------
+# 5.2. Dołączenie grup do danych
+# ------------------------------------------------------------
+
+pozycje <- pozycje |>
+  left_join(
+    mapa_grup,
+    by = "kategoria",
+    relationship = "many-to-one"
+  )
+
+
+# ------------------------------------------------------------
+# 5.3. Kontrola końcowa
+# ------------------------------------------------------------
+
+if (anyNA(pozycje$grupa)) {
+  stop("Po przypisaniu nadal wystepuja brakujace grupy.")
+}
+```
+
+```{r dane-06-kompletnosc, include=FALSE}
+# KOMPLETNOŚĆ | porównujemy obserwowane pary (miesiąc, kod)
+# z pełną siatką; weryfikujemy też skończoność kwot.
+
+# ============================================================
+# 6. KONTROLA KOMPLETNOŚCI OBSERWACJI
+# ============================================================
+
+# Tworzymy pełną sekwencję miesięcy.
+
+miesiace <- seq(
+  min(dane$data),
+  max(dane$data),
+  by = 1
+)
+
+# Oczekujemy obserwacji każdego kodu
+# w każdym miesiącu.
+
+siatka_kodow <- tidyr::expand_grid(
+  data = miesiace,
+  kod = unique(pozycje$kod)
+)
+
+# Szukamy brakujących par miesiąc-kod.
+
+brakujace_wiersze <- anti_join(
+  siatka_kodow,
+  pozycje,
+  by = c("data", "kod")
+)
+
+# Kwoty muszą być skończonymi liczbami.
+
+niepoprawne_kwoty <- sum(
+  !is.finite(pozycje$usd)
+)
+
+if (
+  nrow(brakujace_wiersze) > 0L ||
+  niepoprawne_kwoty > 0L
+) {
+  stop(
+    sprintf(
+      paste(
+        "Dane wymagaja uzupelnienia:",
+        "%d brakujacych obserwacji,",
+        "%d niepoprawnych kwot."
+      ),
+      nrow(brakujace_wiersze),
+      niepoprawne_kwoty
+    )
+  )
+}
+```
+
+```{r dane-07-kategorie, include=FALSE}
+# AGREGACJA KATEGORII | sumujemy wpływy według (data, grupa, kategoria)
+# i przeliczamy USD na miliardy USD; wynik: `skladniki`.
+
+# ============================================================
+# 7. AGREGACJA DO KATEGORII BAZOWYCH
+# ============================================================
+
+# Sumujemy wszystkie kody przypisane
+# do danej kategorii w danym miesiącu.
+#
+# Jednostka: miliardy USD.
+
+skladniki <- pozycje |>
+  group_by(data, grupa, kategoria) |>
+  summarise(
+    mld_usd = sum(usd) / 1e9,
+    .groups = "drop"
+  )
+```
+
+```{r dane-08-agregacja-hierarchii, include=FALSE}
+# AGREGACJA HIERARCHICZNA | z `skladniki` budujemy `dane_ts`:
+# ogółem → grupy → kategorie. `aggregate_key` zapewnia spójne sumowanie.
+
+# ============================================================
+# 8. KONSTRUKCJA HIERARCHICZNYCH SZEREGÓW
+# ============================================================
+
+# Tworzymy hierarchię:
+#
+# Poziom 0: Ogółem
+# Poziom 1: Grupa 1, Grupa 2
+# Poziom 2: Siedem kategorii
+#
+# aggregate_key() automatycznie
+# wyznacza odpowiednie agregaty.
+
+dane_ts <- skladniki |>
+  as_tsibble(
+    index = data,
+    key = c(grupa, kategoria)
+  ) |>
+  aggregate_key(
+    grupa / kategoria,
+    mld_usd = sum(mld_usd)
+  )
+```
+
+```{r dane-09-wezly, include=FALSE}
+# INDEKS WĘZŁÓW | `wezly` opisuje poziom i identyfikatory wszystkich
+# węzłów do późniejszego łączenia wykresów oraz modeli.
+
+# ============================================================
+# 9. IDENTYFIKACJA WĘZŁÓW HIERARCHII
+# ============================================================
+
+# Pobieramy wszystkie węzły
+# wygenerowanej hierarchii.
+
+wezly <- dane_ts |>
+  key_data() |>
+  select(-.rows) |>
+  mutate(
+
+    poziom = factor(
+      case_when(
+        is_aggregated(grupa) ~ "Ogółem",
+        is_aggregated(kategoria) ~ "Grupy",
+        TRUE ~ "Kategorie"
+      ),
+      levels = c(
+        "Ogółem",
+        "Grupy",
+        "Kategorie"
+      )
+    ),
+
+    wezel = case_when(
+      poziom == "Ogółem" ~ params$etykieta_sumy,
+      poziom == "Grupy" ~ as.character(grupa),
+      TRUE ~ as.character(kategoria)
+    )
+  ) |>
+  arrange(poziom, wezel) |>
+  mutate(
+    id_wezla = row_number()
+  )
+```
+
+```{r dane-10-zgodnosc-sumy, include=FALSE}
+# KONTROLA SUMY | `kontrola_sumy` łączy miesięczne sumy po kodach
+# z opublikowanym agregatem. Sama różnica będzie pokazana w osobnym chunku.
+
+# ============================================================
+# 10. PORÓWNANIE Z OPUBLIKOWANĄ SUMĄ
+# ============================================================
+
+# Porównujemy dochody ogółem opublikowane
+# przez U.S. Treasury z sumą kodów bazowych.
+
+kontrola_sumy <- sumy_opublikowane |>
+  group_by(data) |>
+  summarise(
+    opublikowana = sum(usd),
+    .groups = "drop"
+  ) |>
+  filter(is.finite(opublikowana)) |>
+  inner_join(
+    pozycje |>
+      group_by(data) |>
+      summarise(
+        suma_kodow = sum(usd),
+        .groups = "drop"
+      ),
+    by = "data"
+  )
+```
+
+```{r dane-11-charakterystyka, include=FALSE}
+# METADANE | liczby grup, miesięcy, kategorii i węzłów oraz opis źródła
+# są wykorzystywane przez opisy i tabele, bez wyświetlania tutaj.
+
+# ============================================================
+# 11. PODSTAWOWE INFORMACJE O ZBIORZE
+# ============================================================
+
+n_grup <- n_distinct(mapa_grup$grupa)
+
+n_kategorii <- nrow(mapa_grup)
+
+n_miesiecy <- length(miesiace)
+
+n_szeregow <- nrow(wezly)
+
+opis_zrodla <- if (nzchar(params$zrodlo)) {
+  paste0(
+    "Źródłem danych jest ",
+    params$zrodlo,
+    "."
+  )
+} else {
+  ""
+}
+```
+
+```{r funkcja-tabela-praca, include=FALSE}
+# DEFINICJA FUNKCJI TABEL | bez renderowania przykładowych tabel.
+# Wszystkie tryby min/max, formatowania liczb i źródeł pozostają bez zmian.
+# Jedyna zmiana zachowania: dla PDF domyślnie używamy [H] zamiast pływania.
+
+# ============================================================
+# tabela_praca() — spójne tabele do pracy inżynierskiej
+# Wymagane pakiety: knitr, kableExtra
+# Obsługiwane formaty: PDF (LaTeX) i HTML
+# Dokumentacja: DOKUMENTACJA_tabela_praca.md
+# ============================================================
+
+#' Tabela wyników do raportu naukowego (HTML / PDF)
+#'
+#' @param dane Ramka danych (data.frame lub tibble), co najmniej 1 wiersz i 1 kolumna.
+#' @param podpis Podpis wyświetlany nad tabelą.
+#' @param nazwy_kolumn Nazwy wyświetlane w nagłówku; domyślnie names(dane).
+#' @param zrodlo Tekst źródła, np. "Opracowanie własne."; NULL / "" ukrywa źródło.
+#' @param miejsca_dz Jedna liczba miejsc po przecinku lub wektor o długości ncol(dane).
+#' @param wyroznienie "brak", "wiersz", "kolumny", "wiersze".
+#' @param kryterium "min" lub "max"; dotyczy trybów "kolumny" i "wiersze".
+#' @param kolumny_oceny NULL (wszystkie kolumny liczbowe), nazwy lub numery
+#'   kolumn liczbowych porównywanych przy automatycznym wyróżnianiu.
+#' @param wyrozniony_wiersz Numer(y) wierszy do pogrubienia w trybie "wiersz".
+#'   Dla zgodności z wcześniejszą wersją podanie tego argumentu bez
+#'   `wyroznienie` automatycznie aktywuje tryb "wiersz".
+#' @param kolor_tekstu Kolor tekstu nagłówka (kod HEX).
+#' @param kolor_tla Kolor tła nagłówka (kod HEX).
+#' @param rozmiar_czcionki Wielkość czcionki tabeli.
+#' @param pelna_szerokosc Czy tabela ma zajmować pełną szerokość (głównie HTML).
+#' @param zatrzymaj_pozycje TRUE (domyślnie) umieszcza tabelę w miejscu
+#'   wywołania dzięki [H] (`HOLD_position`); FALSE dopuszcza przemieszczanie.
+#'   Gdy na stronie brakuje miejsca, tabela może rozpocząć następną stronę.
+#' @param format_wyjscia "auto", "html" lub "latex". W zwykłej sesji R
+#'   "auto" wybiera HTML; przy Knit do PDF — LaTeX.
+#'
+#' @return Obiekt tabeli kableExtra gotowy do wyświetlenia w raporcie.
+#' @details
+#'   * Automatycznie wyróżniane są wszystkie remisy (np. dwa równe minima).
+#'   * NA, NaN, Inf i -Inf nie biorą udziału w wyborze minimum/maksimum.
+#'   * Porównania wykonywane są na liczbach PRZED zaokrągleniem do wyświetlenia.
+#'   * W trybie "wiersze" porównywane wartości muszą mieć porównywalną skalę
+#'     i znaczenie. Np. MAE / RMSE (mld USD) i MASE nie powinny być tak
+#'     porównywane.
+#'
+#' @examples
+#' wyniki <- data.frame(
+#'   Model = c("Naive", "SNaive", "ETS", "ARIMA"),
+#'   MAE = c(10.42, 9.31, 8.75, 8.21),
+#'   RMSE = c(12.80, 12.01, 11.50, 10.95),
+#'   MASE = c(1.08, 0.91, 0.84, 0.80)
+#' )
+#' tabela_praca(wyniki, "Porównanie modeli", wyroznienie = "kolumny",
+#'              kryterium = "min")
+
+tabela_praca <- function(
+    dane,
+    podpis,
+    nazwy_kolumn = names(dane),
+    zrodlo = "Opracowanie własne.",
+    miejsca_dz = 2,
+    wyrozniony_wiersz = NULL,
+    kolor_tekstu = "#1B365D",
+    kolor_tla = "#EEF2F6",
+    rozmiar_czcionki = 10,
+    pelna_szerokosc = FALSE,
+    zatrzymaj_pozycje = TRUE,
+    wyroznienie = "brak",
+    kryterium = "min",
+    kolumny_oceny = NULL,
+    format_wyjscia = "auto"
+) {
+  # --- 1. Sprawdzenie danych i argumentów --------------------
+  if (!is.data.frame(dane) || nrow(dane) < 1L || ncol(dane) < 1L) {
+    stop("'dane' musi być niepustą ramką danych (data.frame/tibble).")
+  }
+  if (!is.character(podpis) || length(podpis) != 1L ||
+      is.na(podpis) || !nzchar(podpis)) {
+    stop("'podpis' musi być niepustym tekstem.")
+  }
+  if (!is.character(nazwy_kolumn) ||
+      length(nazwy_kolumn) != ncol(dane) || anyNA(nazwy_kolumn)) {
+    stop("'nazwy_kolumn' musi zawierać po jednej nazwie na kolumnę.")
+  }
+  if (!is.numeric(miejsca_dz) ||
+      !length(miejsca_dz) %in% c(1L, ncol(dane)) ||
+      any(!is.finite(miejsca_dz)) || any(miejsca_dz < 0) ||
+      any(miejsca_dz != floor(miejsca_dz))) {
+    stop("'miejsca_dz' to nieujemna liczba całkowita lub wektor długości ncol(dane).")
+  }
+
+  # Zgodność ze starszą funkcją:
+  # tabela_praca(..., wyrozniony_wiersz = 2) nadal pogrubia 2. wiersz.
+  if (missing(wyroznienie) && !is.null(wyrozniony_wiersz)) {
+    wyroznienie <- "wiersz"
+  }
+  wyroznienie <- match.arg(
+    wyroznienie, c("brak", "wiersz", "kolumny", "wiersze")
+  )
+  kryterium <- match.arg(kryterium, c("min", "max"))
+  format_wyjscia <- match.arg(format_wyjscia, c("auto", "html", "latex"))
+
+  if (format_wyjscia == "auto") {
+    format_wyjscia <- if (knitr::is_latex_output()) "latex" else "html"
+  }
+
+  if (wyroznienie == "wiersz") {
+    if (is.null(wyrozniony_wiersz) ||
+        !is.numeric(wyrozniony_wiersz) ||
+        length(wyrozniony_wiersz) < 1L ||
+        any(!is.finite(wyrozniony_wiersz)) ||
+        any(wyrozniony_wiersz != floor(wyrozniony_wiersz)) ||
+        any(wyrozniony_wiersz < 1L | wyrozniony_wiersz > nrow(dane))) {
+      stop("Dla 'wyroznienie = \"wiersz\"' podaj poprawny 'wyrozniony_wiersz'.")
+    }
+  }
+
+  # --- 2. Wybór kolumn porównywanych przy min / max ----------
+  porownuj <- wyroznienie %in% c("kolumny", "wiersze")
+  indeksy <- integer(0)
+
+  if (porownuj) {
+    if (is.null(kolumny_oceny)) {
+      indeksy <- which(vapply(dane, is.numeric, logical(1)))
+    } else if (is.character(kolumny_oceny)) {
+      indeksy <- match(kolumny_oceny, names(dane))
+    } else if (is.numeric(kolumny_oceny)) {
+      indeksy <- kolumny_oceny
+    } else {
+      stop("'kolumny_oceny' podaj jako nazwy lub numery kolumn liczbowych.")
+    }
+
+    if (!length(indeksy) || anyNA(indeksy) ||
+        any(!is.finite(indeksy)) || any(indeksy != floor(indeksy)) ||
+        any(indeksy < 1 | indeksy > ncol(dane)) ||
+        anyDuplicated(indeksy)) {
+      stop("'kolumny_oceny' musi wskazywać istniejące, różne kolumny.")
+    }
+    if (!all(vapply(dane[indeksy], is.numeric, logical(1)))) {
+      stop("Porównywać można wyłącznie kolumny liczbowe.")
+    }
+  }
+
+  # --- 3. Wyznaczenie komórek do pogrubienia -----------------
+  pogrub <- matrix(FALSE, nrow = nrow(dane), ncol = ncol(dane))
+
+  if (wyroznienie == "kolumny") {
+    for (j in indeksy) {
+      x <- dane[[j]]
+      dostepne <- which(is.finite(x))
+      if (!length(dostepne)) next
+      ekstremum <- if (kryterium == "min") {
+        min(x[dostepne])
+      } else {
+        max(x[dostepne])
+      }
+      pogrub[dostepne, j] <- x[dostepne] == ekstremum
+    }
+  }
+
+  if (wyroznienie == "wiersze") {
+    for (i in seq_len(nrow(dane))) {
+      wartosci <- vapply(indeksy, function(j) {
+        as.numeric(dane[[j]][i])
+      }, numeric(1))
+      dostepne <- which(is.finite(wartosci))
+      if (!length(dostepne)) next
+      ekstremum <- if (kryterium == "min") {
+        min(wartosci[dostepne])
+      } else {
+        max(wartosci[dostepne])
+      }
+      najlepsze <- dostepne[wartosci[dostepne] == ekstremum]
+      pogrub[i, indeksy[najlepsze]] <- TRUE
+    }
+  }
+
+  # --- 4. Tabela i jednolity styl ----------------------------
+  wyrownanie <- ifelse(
+    vapply(dane, is.numeric, logical(1)), "r", "l"
+  )
+  digits_vec <- rep(miejsca_dz, length.out = ncol(dane))
+
+  tab <- kableExtra::kbl(
+    dane,
+    format = format_wyjscia,
+    booktabs = TRUE,
+    row.names = FALSE,
+    caption = podpis,
+    col.names = nazwy_kolumn,
+    align = wyrownanie,
+    digits = digits_vec,
+    format.args = list(decimal.mark = ",", big.mark = " "),
+    escape = TRUE
+  )
+
+  tab <- kableExtra::kable_styling(
+    tab,
+    latex_options = if (zatrzymaj_pozycje) "HOLD_position" else "basic",
+    full_width = pelna_szerokosc,
+    font_size = rozmiar_czcionki,
+    position = "center"
+  )
+
+  tab <- kableExtra::row_spec(
+    tab, 0,
+    bold = TRUE,
+    color = kolor_tekstu,
+    background = kolor_tla
+  )
+
+  # --- 5. Pogrubienie wybranych wierszy / komórek -----------
+  if (wyroznienie == "wiersz") {
+    tab <- kableExtra::row_spec(tab, unique(wyrozniony_wiersz), bold = TRUE)
+  }
+
+  if (porownuj) {
+    for (j in indeksy) {
+      if (any(pogrub[, j])) {
+        # column_spec obsługuje logiczny wektor pogrubień po wierszach.
+        # Pozostawiamy escape=TRUE, więc specjalne znaki w danych są bezpieczne.
+        tab <- kableExtra::column_spec(tab, column = j, bold = pogrub[, j])
+      }
+    }
+  }
+
+  # --- 6. Źródło pod tabelą ---------------------------------
+  if (!is.null(zrodlo)) {
+    if (!is.character(zrodlo) || length(zrodlo) != 1L || is.na(zrodlo)) {
+      stop("'zrodlo' powinno być pojedynczym tekstem, NULL lub pustym tekstem.")
+    }
+    if (nzchar(zrodlo)) {
+      tab <- kableExtra::footnote(
+        tab,
+        general = zrodlo,
+        general_title = "Źródło: ",
+        footnote_as_chunk = TRUE,
+        threeparttable = (format_wyjscia == "latex"),
+        fixed_small_size = TRUE,
+        title_format = "italic"
+      )
+    }
+  }
+
+  return(tab)
+}
+```
+
+```{r funkcja-wykres-kolowy, include=FALSE}
+
+# ============================================================
+# wykres_kolowy() — wykresy do pracy inżynierskiej
+# Wymagane pakiety: ggplot2, dplyr, knitr, stringr
+# Obsługiwane formaty: PDF (LaTeX) i HTML
+#
+# Wykresy kołowe i pierścieniowe ze spójną kolorystyką.
+# Duże udziały opisujemy wewnątrz segmentów,
+# małe udziały — na zewnątrz z liniami prowadzącymi.
+#
+# Podpis i źródło generowane są automatycznie.
+# Nie trzeba ustawiać fig.cap.
+# ============================================================
+
+#' Wykres kołowy lub pierścieniowy do raportu naukowego
+#'
+#' @param dane Ramka danych (data.frame lub tibble).
+#' @param podpis Podpis rysunku, numerowany automatycznie w PDF.
+#' @param kategoria Nazwa kolumny z nazwami kategorii.
+#' @param wartosc Nazwa kolumny z wartościami liczbowymi.
+#' @param zrodlo Źródło pod rysunkiem; NULL lub "" ukrywa źródło.
+#' @param typ "pierscieniowy" albo "kolowy".
+#' @param kolory Wektor kolorów HEX; NULL używa palety raportu.
+#' @param sortuj TRUE sortuje kategorie malejąco.
+#' @param procenty_legenda TRUE dodaje procenty do legendy.
+#' @param procenty_wycinki TRUE pokazuje procenty na dużych segmentach.
+#' @param prog_etykiety Granica udziału dla etykiet wewnętrznych,
+#'   np. 0.05 oznacza 5%.
+#' @param etykiety_zewnetrzne TRUE pokazuje małe udziały poza kołem.
+#' @param odstep_etykiet Minimalny pionowy odstęp między zewnętrznymi
+#'   etykietami, wyrażony w jednostkach współrzędnych wykresu.
+#' @param kolor_linii Kolor linii prowadzących do małych segmentów.
+#' @param napis_srodka Opcjonalny napis w środku pierścienia.
+#' @param miejsca_dz Liczba miejsc po przecinku.
+#' @param kolor_tekstu Kolor tekstu legendy i etykiet zewnętrznych.
+#' @param kolor_tla Tło etykiet w trybie "ramka".
+#' @param rozmiar_czcionki Podstawowa wielkość tekstu.
+#' @param legenda "right", "left", "top", "bottom" albo "none".
+#' @param szerokosc Szerokość grafiki w calach.
+#' @param wysokosc Wysokość grafiki w calach.
+#' @param zatrzymaj_pozycje TRUE używa [H] w LaTeX.
+#' @param tytul_legendy Nagłówek legendy; NULL usuwa nagłówek.
+#' @param zawijanie_legendy Długość wiersza etykiety legendy.
+#' @param styl_etykiet "tekst" lub "ramka" dla dużych segmentów.
+#' @param grubosc_obramowania Grubość białych granic segmentów.
+#'
+#' @return Poza Knit obiekt ggplot; podczas Knit gotowy rysunek
+#'   z podpisem i źródłem w PDF albo HTML.
+#'
+#' @details
+#'   * Powtarzające się kategorie są sumowane.
+#'   * Udziały obliczane są przed zaokrągleniem.
+#'   * Wartości muszą być nieujemne i skończone.
+#'   * Procenty dużych segmentów mają biały, pogrubiony tekst.
+#'   * Procenty małych segmentów mają linie prowadzące.
+#'   * Etykiety zewnętrzne są rozsuwane osobno po obu stronach.
+#'   * Kategorie o wartości zero nie mają widocznego segmentu.
+#'   * Podpis i źródło nie są częścią obrazu ggplot.
+#'   * W jednym chunku wywołujemy funkcję jeden raz.
+#'
+#' @examples
+#' wykres_kolowy(
+#'   dane = udzialy,
+#'   podpis = "Struktura dochodów federalnych USA",
+#'   kategoria = "kategoria",
+#'   wartosc = "lacznie"
+#' )
+
+wykres_kolowy <- function(
+    dane,
+    podpis,
+    kategoria = "kategoria",
+    wartosc = "lacznie",
+    zrodlo = "Opracowanie własne.",
+    typ = "pierscieniowy",
+    kolory = NULL,
+    sortuj = TRUE,
+    procenty_legenda = FALSE,
+    procenty_wycinki = TRUE,
+    prog_etykiety = 0.05,
+    etykiety_zewnetrzne = TRUE,
+    odstep_etykiet = 0.1,
+    kolor_linii = "#627A94",
+    napis_srodka = NULL,
+    miejsca_dz = 1,
+    kolor_tekstu = "#1B365D",
+    kolor_tla = "#EEF2F6",
+    rozmiar_czcionki = 11,
+    legenda = "right",
+    szerokosc = 7.5,
+    wysokosc = 4.8,
+    zatrzymaj_pozycje = TRUE,
+    tytul_legendy = "Kategoria",
+    zawijanie_legendy = 28,
+    styl_etykiet = "tekst",
+    grubosc_obramowania = 0.8
+) {
+
+  # --- 1. Walidacja argumentów -------------------------------
+
+  typ <- match.arg(
+    typ, c("pierscieniowy", "kolowy")
+  )
+
+  legenda <- match.arg(
+    legenda, c("right", "left", "top", "bottom", "none")
+  )
+
+  styl_etykiet <- match.arg(
+    styl_etykiet, c("tekst", "ramka")
+  )
+
+  if (!is.data.frame(dane) || nrow(dane) < 1L) {
+    stop("'dane' musi być niepustą ramką danych.")
+  }
+
+  if (!all(c(kategoria, wartosc) %in% names(dane))) {
+    stop("Brakuje wymaganych kolumn w 'dane'.")
+  }
+
+  if (!is.numeric(dane[[wartosc]])) {
+    stop("Kolumna wartości musi być liczbowa.")
+  }
+
+  if (anyNA(dane[[kategoria]]) ||
+      any(!nzchar(trimws(as.character(dane[[kategoria]]))))) {
+    stop("Nazwy kategorii nie mogą być puste.")
+  }
+
+  if (any(!is.finite(dane[[wartosc]])) ||
+      any(dane[[wartosc]] < 0)) {
+    stop("Wartości muszą być nieujemne i skończone.")
+  }
+
+  if (!is.character(podpis) ||
+      length(podpis) != 1L ||
+      is.na(podpis) || !nzchar(podpis)) {
+    stop("'podpis' musi być niepustym tekstem.")
+  }
+
+  if (!is.null(zrodlo) &&
+      (!is.character(zrodlo) ||
+       length(zrodlo) != 1L || is.na(zrodlo))) {
+    stop("'zrodlo' musi być tekstem, NULL lub ''.")
+  }
+
+  if (!is.numeric(miejsca_dz) ||
+      length(miejsca_dz) != 1L ||
+      !is.finite(miejsca_dz) ||
+      miejsca_dz < 0 ||
+      miejsca_dz != floor(miejsca_dz)) {
+    stop("'miejsca_dz' musi być liczbą całkowitą >= 0.")
+  }
+
+  if (!is.numeric(prog_etykiety) ||
+      length(prog_etykiety) != 1L ||
+      !is.finite(prog_etykiety) ||
+      prog_etykiety < 0 ||
+      prog_etykiety > 1) {
+    stop("'prog_etykiety' musi należeć do [0, 1].")
+  }
+
+  if (!is.numeric(odstep_etykiet) ||
+      length(odstep_etykiet) != 1L ||
+      !is.finite(odstep_etykiet) ||
+      odstep_etykiet <= 0) {
+    stop("'odstep_etykiet' musi być dodatnią liczbą.")
+  }
+
+  if (!is.numeric(szerokosc) ||
+      !is.numeric(wysokosc) ||
+      length(szerokosc) != 1L ||
+      length(wysokosc) != 1L ||
+      !is.finite(szerokosc) ||
+      !is.finite(wysokosc) ||
+      szerokosc <= 0 || wysokosc <= 0) {
+    stop("Wymiary wykresu muszą być dodatnie.")
+  }
+
+  if (!is.numeric(grubosc_obramowania) ||
+      length(grubosc_obramowania) != 1L ||
+      !is.finite(grubosc_obramowania) ||
+      grubosc_obramowania < 0) {
+    stop("'grubosc_obramowania' musi być nieujemna.")
+  }
+
+  if (!is.numeric(zawijanie_legendy) ||
+      length(zawijanie_legendy) != 1L ||
+      !is.finite(zawijanie_legendy) ||
+      zawijanie_legendy < 10) {
+    stop("'zawijanie_legendy' musi być liczbą >= 10.")
+  }
+
+  # --- 2. Przygotowanie danych -------------------------------
+
+  # Pobieramy nazwy kategorii oraz odpowiadające im wartości.
+  # Powtarzające się kategorie łączymy przez sumowanie.
+
+  pozycje <- data.frame(
+    kategoria = as.character(dane[[kategoria]]),
+    wartosc = dane[[wartosc]]
+  )
+
+  kolejnosc <- unique(pozycje$kategoria)
+
+  pozycje <- pozycje |>
+    dplyr::group_by(kategoria) |>
+    dplyr::summarise(
+      wartosc = sum(wartosc),
+      .groups = "drop"
+    )
+
+  if (sortuj) {
+
+    pozycje <- pozycje |>
+      dplyr::arrange(dplyr::desc(wartosc))
+
+  } else {
+
+    pozycje <- pozycje[
+      match(kolejnosc, pozycje$kategoria), ,
+      drop = FALSE
+    ]
+  }
+
+  # --- 3. Obliczenie udziałów -------------------------------
+
+  # Udział = wartość kategorii / suma wszystkich wartości.
+  #
+  # Do geometrii wykorzystujemy wartości niezaokrąglone.
+  # Zaokrąglamy jedynie tekst procentowy.
+
+  suma <- sum(pozycje$wartosc)
+
+  if (!is.finite(suma) || suma <= 0) {
+    stop("Suma wartości musi być dodatnia.")
+  }
+
+  pozycje$udzial <- pozycje$wartosc / suma
+
+  pozycje$procent <- paste0(
+    formatC(
+      100 * pozycje$udzial,
+      format = "f",
+      digits = miejsca_dz,
+      decimal.mark = ","
+    ),
+    "%"
+  )
+
+  nazwy <- pozycje$kategoria
+
+  pozycje$kategoria <- factor(
+    pozycje$kategoria,
+    levels = nazwy
+  )
+
+  # --- 4. Kolorystyka ---------------------------------------
+
+  # Priorytet:
+  # 1. Kolory podane przez użytkownika.
+  # 2. Obiekt paleta z R Markdown.
+  # 3. Domyślna paleta finansowa A.
+
+  if (is.null(kolory)) {
+
+    kolory <- get0(
+      "paleta",
+      inherits = TRUE,
+      ifnotfound = c(
+        "#1B365D", "#D97724", "#2E6F40",
+        "#8C2D19", "#4A7C9B", "#E5B25D",
+        "#5C5346", "#6B8E23", "#8E6C8A",
+        "#A3B18A"
+      )
+    )
+  }
+
+  if (!is.character(kolory) || anyNA(kolory)) {
+    stop("'kolory' musi być wektorem kolorów.")
+  }
+
+  if (!is.null(names(kolory)) &&
+      all(nzchar(names(kolory)))) {
+
+    if (!all(nazwy %in% names(kolory))) {
+      stop("Brakuje kolorów dla niektórych kategorii.")
+    }
+
+    paleta_wykresu <- kolory[nazwy]
+
+  } else {
+
+    if (length(kolory) < length(nazwy)) {
+      stop("Za mało kolorów dla kategorii.")
+    }
+
+    paleta_wykresu <- stats::setNames(
+      unname(kolory[seq_along(nazwy)]),
+      nazwy
+    )
+  }
+
+  # --- 5. Obliczenie geometrii segmentów --------------------
+
+  # Zamiast coord_polar() wyznaczamy współrzędne koła
+  # bezpośrednio w układzie kartezjańskim.
+  #
+  # Umożliwia to precyzyjne rysowanie linii prowadzących.
+  #
+  # Kąt 0 znajduje się na godzinie 12.
+  # Kąt rośnie zgodnie z ruchem wskazówek zegara.
+  #
+  # Zachowujemy kolejność wycinków ze starszego
+  # wykresu, w którym geom_col() stosował
+  # odwrotną kolejność układania kategorii.
+
+  pozycje$koniec <- 1 - cumsum(pozycje$udzial) +
+    pozycje$udzial
+
+  pozycje$poczatek <- pozycje$koniec -
+    pozycje$udzial
+
+  pozycje$kat_poczatek <- 2 * pi * pozycje$poczatek
+  pozycje$kat_koniec <- 2 * pi * pozycje$koniec
+
+  pozycje$kat_srodek <- (
+    pozycje$kat_poczatek +
+    pozycje$kat_koniec
+  ) / 2
+
+  # Promień zewnętrzny zawsze wynosi 1.
+  # W trybie pierścieniowym pozostawiamy pusty środek.
+
+  r_zewn <- 1
+  r_wewn <- if (typ == "pierscieniowy") 0.50 else 0
+
+  # Tworzymy wielokąty reprezentujące wycinki.
+  # Każdy wycinek składa się z punktów
+  # na okręgu zewnętrznym i wewnętrznym.
+
+  segmenty <- lapply(seq_len(nrow(pozycje)), function(i) {
+
+    if (pozycje$udzial[i] <= 0) {
+      return(NULL)
+    }
+
+    katy <- seq(
+      pozycje$kat_poczatek[i],
+      pozycje$kat_koniec[i],
+      length.out = 181L
+    )
+
+    if (r_wewn > 0) {
+
+      x <- c(
+        r_zewn * sin(katy),
+        r_wewn * sin(rev(katy))
+      )
+
+      y <- c(
+        r_zewn * cos(katy),
+        r_wewn * cos(rev(katy))
+      )
+
+    } else {
+
+      x <- c(0, r_zewn * sin(katy), 0)
+      y <- c(0, r_zewn * cos(katy), 0)
+    }
+
+    data.frame(
+      kategoria = pozycje$kategoria[i],
+      x = x,
+      y = y
+    )
+  })
+
+  segmenty <- do.call(rbind, segmenty)
+
+  # --- 6. Pozycje procentów wewnątrz wycinków ---------------
+
+  # Etykieta znajduje się na dwusiecznej kąta wycinka.
+  # Wykorzystujemy środek szerokości pierścienia.
+
+  r_etykiety <- (r_wewn + r_zewn) / 2
+
+  pozycje$x_wewn <- r_etykiety *
+    sin(pozycje$kat_srodek)
+
+  pozycje$y_wewn <- r_etykiety *
+    cos(pozycje$kat_srodek)
+
+  duze <- pozycje |>
+    dplyr::filter(
+      udzial >= prog_etykiety,
+      udzial > 0
+    )
+
+  # --- 7. Pozycje małych etykiet na zewnątrz ----------------
+
+  # Wybieramy kategorie o udziałach poniżej progu.
+  # Przykład:
+  #
+  # 49,7% -> etykieta wewnętrzna
+  #  2,5% -> etykieta zewnętrzna
+  #
+  # Linie prowadzące zaczynają się przy danym wycinku,
+  # wychodzą poza okrąg i kończą obok napisu.
+
+  male <- pozycje |>
+    dplyr::filter(
+      udzial < prog_etykiety,
+      udzial > 0
+    )
+
+  if (nrow(male) > 0L) {
+
+    male <- male |>
+      dplyr::mutate(
+        strona = ifelse(
+          sin(kat_srodek) >= 0,
+          "prawa",
+          "lewa"
+        ),
+
+        # Początek linii tuż poza okręgiem.
+        x_start = 1.01 * sin(kat_srodek),
+        y_start = 1.01 * cos(kat_srodek),
+
+        # Punkt załamania linii.
+        x_zalamanie = 1.12 * sin(kat_srodek),
+        y_zalamanie = 1.12 * cos(kat_srodek),
+
+        # Koniec linii i miejsce tekstu.
+        x_koniec = ifelse(
+          strona == "prawa", 1.19, -1.19
+        ),
+
+        x_napis = ifelse(
+          strona == "prawa", 1.24, -1.24
+        ),
+
+        hjust_napis = ifelse(
+          strona == "prawa", 0, 1
+        ),
+
+        y_napis = y_start * 1.14
+      )
+
+    # Rozsuwamy etykiety osobno po lewej i prawej stronie.
+    # Ich kolejność pionowa odpowiada kolejności wycinków.
+    #
+    # Dzięki temu linie nie muszą się krzyżować,
+    # a małe wartości nie nachodzą na siebie.
+
+    for (bok in c("prawa", "lewa")) {
+
+      idx <- which(male$strona == bok)
+
+      if (length(idx) == 0L) next
+
+      idx <- idx[
+        order(male$y_start[idx], decreasing = TRUE)
+      ]
+
+      # Maksymalny zakres etykiet: od -1,2 do 1,2.
+      # Dla większej liczby etykiet odstęp jest zmniejszany.
+
+      odstep <- min(
+        odstep_etykiet,
+        2.4 / max(1, length(idx) - 1L)
+      )
+
+      pozycje_y <- pmax(
+        -1.2,
+        pmin(1.2, male$y_napis[idx])
+      )
+
+      if (length(idx) > 1L) {
+
+        for (j in 2:length(idx)) {
+
+          pozycje_y[j] <- min(
+            pozycje_y[j],
+            pozycje_y[j - 1L] - odstep
+          )
+        }
+      }
+
+      # W razie potrzeby przesuwamy cały zestaw etykiet,
+      # aby zmieścił się w dostępnym obszarze.
+
+      if (min(pozycje_y) < -1.2) {
+
+        pozycje_y <- pozycje_y +
+          (-1.2 - min(pozycje_y))
+      }
+
+      if (max(pozycje_y) > 1.2) {
+
+        pozycje_y <- pozycje_y -
+          (max(pozycje_y) - 1.2)
+      }
+
+      male$y_napis[idx] <- pozycje_y
+    }
+  }
+
+  # --- 8. Przygotowanie legendy -----------------------------
+
+  # Długie nazwy kategorii zawijamy w legendzie.
+  # Nie zmieniamy przy tym nazw w ramce danych.
+
+  nazwy_legendy <- stringr::str_wrap(
+    nazwy,
+    width = zawijanie_legendy
+  )
+
+  etykiety_legendy <- if (procenty_legenda) {
+
+    paste0(
+      nazwy_legendy,
+      " (",
+      pozycje$procent,
+      ")"
+    )
+
+  } else {
+    nazwy_legendy
+  }
+
+  # --- 9. Generowanie pierścienia ---------------------------
+
+  # geom_polygon() rysuje wycinki w wyliczonych
+  # wcześniej współrzędnych.
+  #
+  # coord_fixed() zachowuje rzeczywiste proporcje koła.
+  # Białe obramowanie oddziela kategorie.
+
+  p <- ggplot2::ggplot(
+    segmenty,
+    ggplot2::aes(
+      x = x,
+      y = y,
+      group = kategoria,
+      fill = kategoria
+    )
+  ) +
+
+    ggplot2::geom_polygon(
+      colour = "white",
+      linewidth = grubosc_obramowania
+    ) +
+
+    ggplot2::coord_fixed(
+      xlim = c(-1.67, 1.67),
+      ylim = c(-1.32, 1.32),
+      expand = FALSE,
+      clip = "off"
+    ) +
+
+    ggplot2::scale_fill_manual(
+      values = paleta_wykresu,
+      breaks = nazwy,
+      labels = etykiety_legendy,
+      drop = FALSE
+    ) +
+
+    ggplot2::labs(
+      fill = tytul_legendy
+    ) +
+
+    ggplot2::theme_void(
+      base_size = rozmiar_czcionki
+    ) +
+
+    ggplot2::theme(
+      text = ggplot2::element_text(
+        colour = kolor_tekstu
+      ),
+
+      legend.position = legenda,
+
+      legend.title = ggplot2::element_text(
+        size = rozmiar_czcionki,
+        face = "bold",
+        colour = kolor_tekstu
+      ),
+
+      legend.text = ggplot2::element_text(
+        size = rozmiar_czcionki * 0.92,
+        colour = kolor_tekstu,
+        lineheight = 1
+      ),
+
+      legend.key.width = grid::unit(0.5, "cm"),
+      legend.key.height = grid::unit(0.52, "cm"),
+      legend.spacing.y = grid::unit(0.08, "cm"),
+
+      plot.margin = ggplot2::margin(
+        5, 8, 5, 8
+      )
+    )
+
+  # --- 10. Procenty na dużych segmentach --------------------
+
+  # Duże segmenty oznaczamy białym pogrubionym tekstem.
+  # Jest to ten sam styl, który był stosowany
+  # w pierwszym wariancie wykresów finansowych.
+
+  if (procenty_wycinki && nrow(duze) > 0L) {
+
+    if (styl_etykiet == "tekst") {
+
+      p <- p +
+        ggplot2::geom_text(
+          data = duze,
+          ggplot2::aes(
+            x = x_wewn,
+            y = y_wewn,
+            label = procent
+          ),
+          inherit.aes = FALSE,
+          colour = "white",
+          fontface = "bold",
+          size = 3.5,
+          show.legend = FALSE
+        )
+
+    } else {
+
+      p <- p +
+        ggplot2::geom_label(
+          data = duze,
+          ggplot2::aes(
+            x = x_wewn,
+            y = y_wewn,
+            label = procent
+          ),
+          inherit.aes = FALSE,
+          fill = kolor_tla,
+          colour = kolor_tekstu,
+          fontface = "bold",
+          size = 3.2,
+          label.size = 0,
+          show.legend = FALSE
+        )
+    }
+  }
+
+  # --- 11. Linie prowadzące do małych segmentów -------------
+
+  # Każda linia ma dwa odcinki:
+  #
+  # 1. Krótki odcinek wychodzący na zewnątrz koła.
+  # 2. Odcinek biegnący do pozycji etykiety.
+  #
+  # Ten sposób ułatwia rozróżnienie sąsiednich
+  # bardzo małych segmentów.
+
+  if (etykiety_zewnetrzne && nrow(male) > 0L) {
+
+    p <- p +
+
+      # Pierwszy odcinek: wyjście z wycinka.
+      ggplot2::geom_segment(
+        data = male,
+        ggplot2::aes(
+          x = x_start,
+          y = y_start,
+          xend = x_zalamanie,
+          yend = y_zalamanie
+        ),
+        inherit.aes = FALSE,
+        colour = kolor_linii,
+        linewidth = 0.3
+      ) +
+
+      # Drugi odcinek: połączenie z etykietą.
+      ggplot2::geom_segment(
+        data = male,
+        ggplot2::aes(
+          x = x_zalamanie,
+          y = y_zalamanie,
+          xend = x_koniec,
+          yend = y_napis
+        ),
+        inherit.aes = FALSE,
+        colour = kolor_linii,
+        linewidth = 0.4
+      ) +
+
+      # Procent poza kołem.
+      ggplot2::geom_text(
+        data = male,
+        ggplot2::aes(
+          x = x_napis,
+          y = y_napis,
+          label = procent,
+          hjust = hjust_napis
+        ),
+        inherit.aes = FALSE,
+        colour = kolor_tekstu,
+        fontface = "bold",
+        size = 3.5,
+        show.legend = FALSE
+      )
+  }
+
+  # --- 12. Opcjonalny napis centralny -----------------------
+
+  # Domyślnie środek pierścienia pozostaje pusty.
+  # Napis można włączyć argumentem napis_srodka.
+
+  if (
+    typ == "pierscieniowy" &&
+    !is.null(napis_srodka) &&
+    length(napis_srodka) == 1L &&
+    !is.na(napis_srodka) &&
+    nzchar(napis_srodka)
+  ) {
+
+    p <- p +
+      ggplot2::annotate(
+        "text",
+        x = 0,
+        y = 0,
+        label = napis_srodka,
+        colour = kolor_tekstu,
+        fontface = "bold",
+        size = rozmiar_czcionki / 3
+      )
+  }
+
+  # --- 13. Renderowanie w R Markdown ------------------------
+
+  # Poza Knit zwracamy zwykły obiekt ggplot.
+  # Podczas Knit zapisujemy wykres do pliku i tworzymy
+  # numerowany podpis, bez konieczności używania fig.cap.
+
+  pdf <- knitr::is_latex_output()
+  html <- knitr::is_html_output()
+
+  if (!pdf && !html) {
+    return(p)
+  }
+
+  rozszerzenie <- if (pdf) "pdf" else "png"
+
+  sciezka <- knitr::fig_path(
+    rozszerzenie,
+    number = 1L
+  )
+
+  dir.create(
+    dirname(sciezka),
+    recursive = TRUE,
+    showWarnings = FALSE
+  )
+
+  if (pdf) {
+
+    # PDF wektorowy zachowuje ostrość podczas skalowania.
+
+    ggplot2::ggsave(
+      filename = sciezka,
+      plot = p,
+      device = grDevices::cairo_pdf,
+      width = szerokosc,
+      height = wysokosc,
+      units = "in",
+      bg = "white"
+    )
+
+  } else {
+
+    # PNG przeznaczony do raportu HTML.
+
+    ggplot2::ggsave(
+      filename = sciezka,
+      plot = p,
+      device = "png",
+      width = szerokosc,
+      height = wysokosc,
+      units = "in",
+      dpi = 180,
+      bg = "white"
+    )
+  }
+
+  # --- 14. Funkcje zabezpieczające podpisy ------------------
+
+  # Specjalne znaki LaTeX, takie jak % lub _,
+  # nie mogą pozostać niezmienione w podpisie.
+
+  escape_latex <- function(x) {
+
+    slownik <- c(
+      "\\" = "\\textbackslash{}",
+      "{" = "\\{",
+      "}" = "\\}",
+      "#" = "\\#",
+      "$" = "\\$",
+      "%" = "\\%",
+      "&" = "\\&",
+      "_" = "\\_",
+      "~" = "\\textasciitilde{}",
+      "^" = "\\textasciicircum{}"
+    )
+
+    znaki <- strsplit(x, "", fixed = TRUE)[[1]]
+    zamiany <- slownik[znaki]
+
+    do_zamiany <- !is.na(zamiany)
+
+    znaki[do_zamiany] <- unname(
+      zamiany[do_zamiany]
+    )
+
+    paste0(znaki, collapse = "")
+  }
+
+  escape_html <- function(x) {
+    x <- gsub("&", "&amp;", x, fixed = TRUE)
+    x <- gsub("<", "&lt;", x, fixed = TRUE)
+    x <- gsub(">", "&gt;", x, fixed = TRUE)
+    x <- gsub('"', "&quot;", x, fixed = TRUE)
+    x
+  }
+
+  # --- 15. Podpis, źródło i identyfikator --------------------
+
+  # Identyfikator rysunku pobieramy z nazwy chunka.
+
+  identyfikator <- knitr::opts_current$get("label")
+
+  identyfikator <- gsub(
+    "[^A-Za-z0-9_-]",
+    "-",
+    identyfikator
+  )
+
+  pokaz_zrodlo <- !is.null(zrodlo) && nzchar(zrodlo)
+
+  if (pdf) {
+
+    # W PDF stosujemy środowisko figure.
+    # Opcja H ogranicza przenoszenie rysunku.
+
+    pozycja <- if (zatrzymaj_pozycje) {
+      "H"
+    } else {
+      "htbp"
+    }
+
+    zrodlo_latex <- if (pokaz_zrodlo) {
+      paste0(
+        "{\\footnotesize\\itshape Źródło: ",
+        escape_latex(zrodlo),
+        "\\par}\n"
+      )
+    } else {
+      ""
+    }
+
+    wynik <- paste0(
+      "\n\\begin{figure}[", pozycja, "]\n",
+      "\\centering\n",
+      "\\includegraphics[width=0.99\\linewidth]{",
+      gsub("\\", "/", sciezka, fixed = TRUE),
+      "}\n",
+      "\\caption{", escape_latex(podpis), "}\n",
+      "\\label{fig:", identyfikator, "}\n",
+      zrodlo_latex,
+      "\\end{figure}\n"
+    )
+
+  } else {
+
+    # W HTML tworzymy element figure z podpisem.
+
+    zrodlo_html <- if (pokaz_zrodlo) {
+      paste0(
+        "<div><small><em>Źródło: ",
+        escape_html(zrodlo),
+        "</em></small></div>"
+      )
+    } else {
+      ""
+    }
+
+    wynik <- paste0(
+      '\n<figure id="fig-', identyfikator,
+      '" style="text-align:center;">\n',
+      '<img src="', escape_html(sciezka),
+      '" alt="', escape_html(podpis),
+      '" style="max-width:99%;height:auto;">\n',
+      "<figcaption>",
+      escape_html(podpis),
+      zrodlo_html,
+      "</figcaption>\n",
+      "</figure>\n"
+    )
+  }
+
+  # --- 16. Zwrócenie gotowego rysunku -----------------------
+
+  # asis_output() przekazuje gotowy kod LaTeX/HTML
+  # bezpośrednio do dokumentu.
+  #
+  # Nie należy dodatkowo wywoływać cat().
+
+  return(
+    knitr::asis_output(
+      paste0("\n", wynik, "\n")
+    )
+  )
+}
+
+```
+
+```{r funkcje-wykresow-eda, include=FALSE}
+# ============================================================
+# FUNKCJE WIZUALIZACYJNE — ANALIZA EDA
+# ============================================================
+# Ten chunk DEFINIUJE trzy funkcje, nie rysuje wykresów:
+#   renderuj_rysunki_pracy() — zapis, podpisy i źródła PDF/HTML,
+#   wykres_szeregow()       — miesięczne przebiegi historyczne,
+#   wykres_sezonowosci()    — profile sezonowe z wyróżnieniem roku.
+#
+# Wymagane: ggplot2, dplyr, knitr, scales, obiekty `wyglad`
+# i `motyw_szeregow` z wcześniejszych chunków raportu.
+# Nie trzeba podawać fig.cap w chunkach wywołujących.
+# ============================================================
+
+
+# ============================================================
+# 1. renderuj_rysunki_pracy() — wspólny mechanizm wyjścia
+# ============================================================
+
+#' Osadzanie i numerowanie wykresów w raporcie (PDF/HTML)
+#'
+#' @param wykresy Niepusta lista obiektów ggplot.
+#' @param podpis Podpis rysunku; kolejne części dostają numer części.
+#' @param zrodlo Źródło pod rysunkiem; NULL lub "" ukrywa źródło.
+#' @param szerokosc Szerokość pliku graficznego w calach.
+#' @param wysokosc Wysokość pliku graficznego w calach.
+#' @param zatrzymaj_pozycje TRUE używa środowiska figure[H] w PDF.
+#'
+#' @return Podczas Knit: kod LaTeX/HTML klasy asis_output;
+#'   poza Knit: ggplot albo lista ggplotów.
+#'
+#' @details
+#'   * Pliki PDF zawierają grafikę wektorową.
+#'   * Każda część otrzymuje własny podpis, numer i źródło.
+#'   * Funkcja nie korzysta z fig.cap, aby uniknąć dwóch podpisów.
+#'   * Rysunki umieszczane są kolejno w miejscu wywołania.
+
+renderuj_rysunki_pracy <- function(
+    wykresy,
+    podpis,
+    zrodlo = "Opracowanie własne.",
+    szerokosc = 7,
+    wysokosc = 4.8,
+    zatrzymaj_pozycje = TRUE
+) {
+  # --- 1. Kontrola argumentów -------------------------------
+  if (!is.list(wykresy) || length(wykresy) == 0L ||
+      !all(vapply(wykresy, inherits, logical(1), "ggplot"))) {
+    stop("'wykresy' musi być niepustą listą obiektów ggplot.")
+  }
+  if (!is.character(podpis) || length(podpis) != 1L ||
+      is.na(podpis) || !nzchar(podpis)) {
+    stop("'podpis' musi być niepustym tekstem.")
+  }
+  if (!is.null(zrodlo) &&
+      (!is.character(zrodlo) || length(zrodlo) != 1L || is.na(zrodlo))) {
+    stop("'zrodlo' musi być tekstem, NULL albo ''.")
+  }
+  if (!is.numeric(szerokosc) || !is.numeric(wysokosc) ||
+      length(szerokosc) != 1L || length(wysokosc) != 1L ||
+      !is.finite(szerokosc) || !is.finite(wysokosc) ||
+      szerokosc <= 0 || wysokosc <= 0) {
+    stop("'szerokosc' i 'wysokosc' muszą być dodatnie.")
+  }
+
+  # --- 2. Rozpoznanie docelowego formatu --------------------
+  pdf <- knitr::is_latex_output()
+  html <- knitr::is_html_output()
+  if (!pdf && !html) {
+    if (length(wykresy) == 1L) return(wykresy[[1L]])
+    return(wykresy)
+  }
+
+  # --- 3. Bezpieczne podpisy PDF i HTML ---------------------
+  escape_latex <- function(x) {
+    slownik <- c(
+      "\\" = "\\textbackslash{}", "{" = "\\{", "}" = "\\}",
+      "#" = "\\#", "$" = "\\$", "%" = "\\%", "&" = "\\&",
+      "_" = "\\_", "~" = "\\textasciitilde{}",
+      "^" = "\\textasciicircum{}"
+    )
+    znaki <- strsplit(x, "", fixed = TRUE)[[1L]]
+    zamiany <- unname(slownik[znaki])
+    do_zamiany <- !is.na(zamiany)
+    znaki[do_zamiany] <- zamiany[do_zamiany]
+    paste0(znaki, collapse = "")
+  }
+  escape_html <- function(x) {
+    x <- gsub("&", "&amp;", x, fixed = TRUE)
+    x <- gsub("<", "&lt;", x, fixed = TRUE)
+    x <- gsub(">", "&gt;", x, fixed = TRUE)
+    gsub('"', "&quot;", x, fixed = TRUE)
+  }
+
+  # --- 4. Identyfikatory i zapis kolejnych rysunków ---------
+  etykieta_chunka <- knitr::opts_current$get("label")
+  etykieta_chunka <- gsub("[^A-Za-z0-9_-]", "-", etykieta_chunka)
+  liczba_rysunkow <- length(wykresy)
+  fragmenty <- character(liczba_rysunkow)
+
+  for (i in seq_along(wykresy)) {
+    podpis_i <- if (liczba_rysunkow == 1L) podpis else
+      sprintf("%s (część %d z %d)", podpis, i, liczba_rysunkow)
+    rozszerzenie <- if (pdf) "pdf" else "png"
+    sciezka <- knitr::fig_path(rozszerzenie, number = i)
+    dir.create(dirname(sciezka), recursive = TRUE, showWarnings = FALSE)
+
+    if (pdf) {
+      ggplot2::ggsave(
+        filename = sciezka, plot = wykresy[[i]],
+        device = grDevices::cairo_pdf,
+        width = szerokosc, height = wysokosc, units = "in", bg = "white"
+      )
+    } else {
+      ggplot2::ggsave(
+        filename = sciezka, plot = wykresy[[i]], device = "png",
+        width = szerokosc, height = wysokosc, units = "in",
+        dpi = 180, bg = "white"
+      )
+    }
+
+    id_rysunku <- paste0(etykieta_chunka, "-", i)
+    pokaz_zrodlo <- !is.null(zrodlo) && nzchar(zrodlo)
+
+    # --- 5. Numerowany rysunek LaTeX ------------------------
+    if (pdf) {
+      pozycja <- if (zatrzymaj_pozycje) "H" else "htbp"
+      zrodlo_latex <- if (pokaz_zrodlo) paste0(
+        "{\\footnotesize\\itshape Źródło: ",
+        escape_latex(zrodlo), "\\par}\n"
+      ) else ""
+      fragmenty[i] <- paste0(
+        "\n\\begin{figure}[", pozycja, "]\n",
+        "\\centering\n",
+        "\\includegraphics[width=0.98\\linewidth,",
+        "height=0.75\\textheight,keepaspectratio]{",
+        chartr("\\", "/", sciezka), "}\n",
+        "\\caption{", escape_latex(podpis_i), "}\n",
+        "\\label{fig:", id_rysunku, "}\n",
+        zrodlo_latex,
+        "\\end{figure}\n"
+      )
+    } else {
+      # --- 6. Rysunek z podpisem w HTML ---------------------
+      zrodlo_html <- if (pokaz_zrodlo) paste0(
+        "<div><small><em>Źródło: ",
+        escape_html(zrodlo), "</em></small></div>"
+      ) else ""
+      fragmenty[i] <- paste0(
+        '\n<figure id="fig-', id_rysunku,
+        '" style="text-align:center;">\n',
+        '<img src="', escape_html(sciezka), '" alt="',
+        escape_html(podpis_i),
+        '" style="max-width:98%;height:auto;">\n',
+        "<figcaption>", escape_html(podpis_i),
+        zrodlo_html, "</figcaption>\n</figure>\n"
+      )
+    }
+  }
+
+  # --- 7. Przekazanie rysunków do dokumentu -----------------
+  knitr::asis_output(paste(fragmenty, collapse = "\n\n"))
+}
+
+
+# ============================================================
+# 2. wykres_szeregow() — przebiegi historyczne
+# ============================================================
+
+#' Miesięczne przebiegi szeregów hierarchicznych
+#'
+#' @param dane Ramka z: miesiac (Date), mld_usd, panel, id_wezla.
+#' @param podpis Podpis całej serii rysunków.
+#' @param zrodlo Źródło pod rysunkami.
+#' @param data_walidacji Pierwszy miesiąc walidacji (Date), NULL wyłącza.
+#' @param id_wezlow Wektor ID do pokazania; NULL oznacza wszystkie.
+#' @param kolumny Liczba paneli w wierszu, domyślnie 2.
+#' @param wiersze Liczba wierszy paneli na rysunku, domyślnie 2.
+#' @param skale "free_y", "fixed", "free_x" lub "free".
+#' @param kolor_linii Kolor linii historycznej (jeden we wszystkich panelach).
+#' @param kolor_walidacji Kolor tła okresu walidacji.
+#' @param kolor_granicy Kolor przerywanej granicy trening/walidacja.
+#' @param grubosc_linii Grubość linii obserwacji.
+#' @param zaznacz_walidacje TRUE włącza oznaczenie walidacji.
+#' @param rozmiar_czcionki Bazowy rozmiar tekstu.
+#' @param szerokosc Szerokość grafiki w calach.
+#' @param wysokosc Wysokość grafiki w calach.
+#' @param zatrzymaj_pozycje TRUE umieszcza rysunek w figure[H].
+#'
+#' @return Gotowy ggplot lub numerowane rysunki PDF/HTML.
+#'
+#' @details
+#'   * W każdym panelu pokazujemy jeden szereg.
+#'   * Kolor historycznych obserwacji pozostaje jednolity.
+#'   * Zacienienie walidacji nie zasłania linii obserwacji.
+#'   * Osobne skale Y pokazują zmienność także małych kategorii.
+#'   * Funkcja nie zmienia i nie agreguje danych.
+#'
+#' @examples
+#' wykres_szeregow(historia,
+#'   data_walidacji = pierwszy_miesiac_walidacji)
+
+wykres_szeregow <- function(
+    dane,
+    podpis = "Miesięczne wpływy w węzłach hierarchii",
+    zrodlo = "Opracowanie własne na podstawie danych U.S. Treasury.",
+    data_walidacji = NULL,
+    id_wezlow = NULL,
+    kolumny = wyglad$wykres$kolumny,
+    wiersze = wyglad$wykres$wiersze,
+    skale = "free_y",
+    kolor_linii = wyglad$kolory$obserwacje,
+    kolor_walidacji = wyglad$kolory$walidacja,
+    kolor_granicy = wyglad$kolory$granica,
+    grubosc_linii = wyglad$wykres$grubosc_linii,
+    zaznacz_walidacje = TRUE,
+    rozmiar_czcionki = 10,
+    szerokosc = 7,
+    wysokosc = 4.8,
+    zatrzymaj_pozycje = TRUE
+) {
+  # --- 1. Sprawdzenie poprawności danych --------------------
+  wymagane <- c("miesiac", "mld_usd", "panel", "id_wezla")
+  if (!is.data.frame(dane) || nrow(dane) < 1L ||
+      !all(wymagane %in% names(dane))) {
+    stop("Niepoprawne dane dla wykresu szeregów.")
+  }
+  if (!inherits(dane$miesiac, "Date") ||
+      !is.numeric(dane$mld_usd) ||
+      anyNA(dane$miesiac) || anyNA(dane$panel) ||
+      anyNA(dane$id_wezla) || any(!is.finite(dane$mld_usd))) {
+    stop("Niepoprawne typy danych lub brakujące wartości.")
+  }
+  skale <- match.arg(skale, c("free_y", "fixed", "free_x", "free"))
+  if (!is.numeric(kolumny) || !is.numeric(wiersze) ||
+      length(kolumny) != 1L || length(wiersze) != 1L ||
+      any(!is.finite(c(kolumny, wiersze))) ||
+      any(c(kolumny, wiersze) < 1) ||
+      any(c(kolumny, wiersze) != floor(c(kolumny, wiersze)))) {
+    stop("'kolumny' i 'wiersze' muszą być dodatnimi liczbami całkowitymi.")
+  }
+  if (!is.null(data_walidacji) &&
+      (!inherits(data_walidacji, "Date") ||
+       length(data_walidacji) != 1L || is.na(data_walidacji))) {
+    stop("'data_walidacji' musi być pojedynczym obiektem Date.")
+  }
+
+  # --- 2. Wybór węzłów i podział na rysunki -----------------
+  if (!is.null(id_wezlow)) {
+    dane <- dplyr::filter(dane, id_wezla %in% id_wezlow)
+    if (nrow(dane) == 0L) stop("Nie znaleziono wskazanych węzłów.")
+  }
+  identyfikatory <- sort(unique(dane$id_wezla))
+  liczba_paneli <- kolumny * wiersze
+  zestawy <- split(
+    identyfikatory,
+    ceiling(seq_along(identyfikatory) / liczba_paneli)
+  )
+
+  # --- 3. Generowanie kolejnych wykresów -------------------
+  rysunki <- lapply(zestawy, function(ids) {
+    wybrane <- dplyr::filter(dane, id_wezla %in% ids)
+    p <- ggplot2::ggplot(
+      wybrane, ggplot2::aes(x = miesiac, y = mld_usd)
+    )
+
+    # Zacienienie i granicę walidacji rysujemy pod danymi.
+    if (zaznacz_walidacje && !is.null(data_walidacji)) {
+      p <- p +
+        ggplot2::annotate(
+          "rect", xmin = data_walidacji,
+          xmax = max(wybrane$miesiac) + 16,
+          ymin = -Inf, ymax = Inf, fill = kolor_walidacji
+        ) +
+        ggplot2::geom_vline(
+          xintercept = data_walidacji,
+          colour = kolor_granicy,
+          linetype = "dashed", linewidth = 0.35
+        )
+    }
+
+    # Jeden granatowy kolor w całej hierarchii: kolor nie koduje węzła.
+    p +
+      ggplot2::geom_line(
+        colour = kolor_linii, linewidth = grubosc_linii
+      ) +
+      ggplot2::facet_wrap(
+        ggplot2::vars(panel), scales = skale, ncol = kolumny,
+        labeller = ggplot2::labeller(
+          panel = ggplot2::label_wrap_gen(
+            width = wyglad$wykres$zawijanie_etykiet
+          )
+        )
+      ) +
+      ggplot2::scale_x_date(
+        date_labels = "%Y", breaks = scales::breaks_pretty(n = 4)
+      ) +
+      ggplot2::scale_y_continuous(
+        labels = scales::label_number(decimal.mark = ",", big.mark = " ")
+      ) +
+      ggplot2::labs(x = NULL, y = "mld USD") +
+      motyw_szeregow +
+      ggplot2::theme(
+        text = ggplot2::element_text(
+          size = rozmiar_czcionki, colour = wyglad$kolory$tekst
+        ),
+        legend.position = "none"
+      )
+  })
+
+  # --- 4. Podpisy, źródła i numeracja -----------------------
+  renderuj_rysunki_pracy(
+    wykresy = rysunki, podpis = podpis, zrodlo = zrodlo,
+    szerokosc = szerokosc, wysokosc = wysokosc,
+    zatrzymaj_pozycje = zatrzymaj_pozycje
+  )
+}
+
+
+# ============================================================
+# 3. wykres_sezonowosci() — profile sezonowe
+# ============================================================
+
+#' Sezonowe przebiegi miesięczne z wyróżnieniem najnowszego roku
+#'
+#' @param dane Ramka z: nr_miesiaca, rok, mld_usd, panel, id_wezla.
+#' @param podpis Podpis rysunku.
+#' @param zrodlo Źródło pod rysunkiem.
+#' @param id_wezlow Wektor ID węzłów; NULL oznacza wszystkie.
+#' @param kolumny Liczba paneli w wierszu.
+#' @param wiersze Liczba rzędów paneli na rysunku.
+#' @param skale "free_y", "fixed", "free_x" lub "free".
+#' @param kolory Gradient dwóch lub więcej kolorów.
+#' @param grubosc_linii Grubość standardowej linii rocznej.
+#' @param wyroznij_najnowszy_rok TRUE wyróżnia ostatni rok z danych.
+#' @param mnoznik_grubosci Mnożnik grubości linii ostatniego roku.
+#' @param przezroczystosc_starszych Alpha linii starszych roczników.
+#' @param rozmiar_czcionki Rozmiar tekstu.
+#' @param szerokosc Szerokość rysunku w calach.
+#' @param wysokosc Wysokość rysunku w calach.
+#' @param zatrzymaj_pozycje TRUE stosuje [H] w PDF.
+#'
+#' @return Gotowy ggplot lub numerowane rysunki PDF/HTML.
+#'
+#' @details
+#'   * Jeden rok odpowiada jednej linii w każdym panelu.
+#'   * Starsze roczniki są jaśniejsze i bardziej przezroczyste.
+#'   * Najnowszy pełny rok jest na wierzchu i ma grubszą linię.
+#'   * Kolor danego roku pozostaje taki sam na wszystkich rysunkach.
+#'   * Funkcja nie zmienia wartości miesięcznych wpływów.
+#'
+#' @examples
+#' wykres_sezonowosci(sezony, wyroznij_najnowszy_rok = TRUE)
+
+wykres_sezonowosci <- function(
+    dane,
+    podpis = "Sezonowość miesięcznych wpływów federalnych USA",
+    zrodlo = "Opracowanie własne na podstawie danych U.S. Treasury.",
+    id_wezlow = NULL,
+    kolumny = wyglad$wykres$kolumny,
+    wiersze = wyglad$wykres$wiersze,
+    skale = "free_y",
+    kolory = wyglad$kolory$sezony,
+    grubosc_linii = wyglad$wykres$grubosc_linii,
+    wyroznij_najnowszy_rok = TRUE,
+    mnoznik_grubosci = 1.8,
+    przezroczystosc_starszych = 0.65,
+    rozmiar_czcionki = 10,
+    szerokosc = 7,
+    wysokosc = 4.8,
+    zatrzymaj_pozycje = TRUE
+) {
+  # --- 1. Sprawdzenie danych -------------------------------
+  wymagane <- c("nr_miesiaca", "rok", "mld_usd", "panel", "id_wezla")
+  if (!is.data.frame(dane) || nrow(dane) < 1L ||
+      !all(wymagane %in% names(dane))) {
+    stop("Niepoprawne dane dla wykresu sezonowości.")
+  }
+  if (!is.numeric(dane$nr_miesiaca) ||
+      !is.numeric(dane$rok) || !is.numeric(dane$mld_usd) ||
+      any(!is.finite(dane$nr_miesiaca)) ||
+      any(!is.finite(dane$rok)) ||
+      any(!is.finite(dane$mld_usd)) ||
+      anyNA(dane$panel) || anyNA(dane$id_wezla) ||
+      any(!dane$nr_miesiaca %in% 1:12)) {
+    stop("Niepoprawne wartości miesięcy, lat lub dochodów.")
+  }
+  skale <- match.arg(skale, c("free_y", "fixed", "free_x", "free"))
+  if (!is.numeric(kolumny) || !is.numeric(wiersze) ||
+      length(kolumny) != 1L || length(wiersze) != 1L ||
+      any(!is.finite(c(kolumny, wiersze))) ||
+      any(c(kolumny, wiersze) < 1) ||
+      any(c(kolumny, wiersze) != floor(c(kolumny, wiersze)))) {
+    stop("Liczba kolumn i wierszy musi być dodatnia.")
+  }
+  if (!is.character(kolory) || length(kolory) < 2L || anyNA(kolory)) {
+    stop("'kolory' musi zawierać przynajmniej dwa kolory.")
+  }
+  if (!is.numeric(mnoznik_grubosci) ||
+      length(mnoznik_grubosci) != 1L ||
+      !is.finite(mnoznik_grubosci) || mnoznik_grubosci < 1) {
+    stop("'mnoznik_grubosci' musi być liczbą >= 1.")
+  }
+  if (!is.numeric(przezroczystosc_starszych) ||
+      length(przezroczystosc_starszych) != 1L ||
+      !is.finite(przezroczystosc_starszych) ||
+      przezroczystosc_starszych <= 0 ||
+      przezroczystosc_starszych > 1) {
+    stop("'przezroczystosc_starszych' musi należeć do (0, 1].")
+  }
+
+  # --- 2. Wybór węzłów i identyfikacja ostatniego roku ------
+  if (!is.null(id_wezlow)) {
+    dane <- dplyr::filter(dane, id_wezla %in% id_wezlow)
+    if (nrow(dane) == 0L) stop("Nie znaleziono wskazanych węzłów.")
+  }
+  najnowszy_rok <- max(dane$rok)
+  nazwy_miesiecy <- c(
+    "sty", "lut", "mar", "kwi", "maj", "cze",
+    "lip", "sie", "wrz", "paź", "lis", "gru"
+  )
+
+  # Gradient skaluje lata jednakowo na wszystkich panelach.
+  zakres_lat <- range(dane$rok)
+  if (diff(zakres_lat) == 0) zakres_lat <- zakres_lat + c(-0.5, 0.5)
+  lata_legendy <- sort(unique(c(min(dane$rok), max(dane$rok))))
+
+  # --- 3. Podział na zestawy paneli ------------------------
+  identyfikatory <- sort(unique(dane$id_wezla))
+  liczba_paneli <- kolumny * wiersze
+  zestawy <- split(
+    identyfikatory,
+    ceiling(seq_along(identyfikatory) / liczba_paneli)
+  )
+
+  # --- 4. Rysowanie linii sezonowych -----------------------
+  rysunki <- lapply(zestawy, function(ids) {
+    wybrane <- dplyr::filter(dane, id_wezla %in% ids)
+    p <- ggplot2::ggplot(
+      wybrane,
+      ggplot2::aes(
+        x = nr_miesiaca, y = mld_usd,
+        group = rok, colour = rok
+      )
+    )
+
+    if (wyroznij_najnowszy_rok) {
+      starsze <- dplyr::filter(wybrane, rok != najnowszy_rok)
+      najnowsze <- dplyr::filter(wybrane, rok == najnowszy_rok)
+
+      # Tło: lata wcześniejsze, o mniejszej intensywności.
+      if (nrow(starsze) > 0L) {
+        p <- p + ggplot2::geom_line(
+          data = starsze,
+          linewidth = grubosc_linii,
+          alpha = przezroczystosc_starszych
+        )
+      }
+      # Najnowszy rok: osobna, ostatnia warstwa.
+      if (nrow(najnowsze) > 0L) {
+        p <- p + ggplot2::geom_line(
+          data = najnowsze,
+          linewidth = grubosc_linii * mnoznik_grubosci,
+          alpha = 1
+        )
+      }
+    } else {
+      p <- p + ggplot2::geom_line(linewidth = grubosc_linii)
+    }
+
+    # --- 5. Formatowanie miesięcy, gradientu i paneli ------
+    p +
+      ggplot2::facet_wrap(
+        ggplot2::vars(panel), scales = skale, ncol = kolumny,
+        labeller = ggplot2::labeller(
+          panel = ggplot2::label_wrap_gen(
+            width = wyglad$wykres$zawijanie_etykiet
+          )
+        )
+      ) +
+      ggplot2::scale_x_continuous(
+        breaks = 1:12, labels = nazwy_miesiecy
+      ) +
+      ggplot2::scale_y_continuous(
+        labels = scales::label_number(decimal.mark = ",", big.mark = " ")
+      ) +
+      ggplot2::scale_colour_gradientn(
+        colours = kolory, limits = zakres_lat,
+        breaks = lata_legendy,
+        labels = scales::label_number(accuracy = 1, big.mark = "")
+      ) +
+      ggplot2::labs(x = NULL, y = "mld USD", colour = "Rok") +
+      motyw_szeregow +
+      ggplot2::theme(
+        text = ggplot2::element_text(
+          size = rozmiar_czcionki, colour = wyglad$kolory$tekst
+        ),
+        legend.position = "bottom"
+      )
+  })
+
+  # --- 6. Podpisy, źródła i numeracja ----------------------
+  renderuj_rysunki_pracy(
+    wykresy = rysunki, podpis = podpis, zrodlo = zrodlo,
+    szerokosc = szerokosc, wysokosc = wysokosc,
+    zatrzymaj_pozycje = zatrzymaj_pozycje
+  )
+}
+```
+
+```{r funkcja-wykres-acf, include=FALSE}
+
+# ============================================================
+# FUNKCJA WIZUALIZACYJNA — AUTOKORELACJA ACF
+# ============================================================
+#
+# Funkcja:
+# - rysuje współczynniki autokorelacji,
+# - wyróżnia opóźnienia sezonowe (12, 24, 36),
+# - pokazuje orientacyjne granice 95%,
+# - stosuje styl całego raportu,
+# - nie przelicza wartości ACF.
+#
+# Podział na panele określamy osobno, podczas
+# wywoływania funkcji.
+# ============================================================
+
+#' Wykres funkcji autokorelacji
+#'
+#' @param dane_acf Ramka zawierająca:
+#'   opoznienie, acf, roczne, granica, panel.
+#'
+#' @return Obiekt ggplot bez narzuconego podziału
+#'   na panele.
+#'
+#' @details
+#'   * Zwykłe opóźnienia są szaroniebieskie.
+#'   * Opóźnienia sezonowe są turkusowe.
+#'   * Linie przerywane odpowiadają granicom 95%.
+#'   * Wspólna oś Y obejmuje przedział [-1, 1].
+#'   * Funkcja współpracuje z facet_wrap().
+
+wykres_acf <- function(dane_acf) {
+
+  # --- 1. Maksymalne opóźnienie ---------------------------
+
+  lag_max <- max(dane_acf$opoznienie)
+
+  # --- 2. Granice 95% dla poszczególnych paneli -----------
+
+  granice <- dplyr::distinct(
+    dane_acf,
+    panel,
+    granica,
+    dplyr::across(
+      dplyr::any_of("panel_porownania")
+    )
+  )
+
+  # --- 3. Konstrukcja wykresu -----------------------------
+
+  ggplot2::ggplot(
+    dane_acf,
+    ggplot2::aes(
+      x = opoznienie,
+      y = acf
+    )
+  ) +
+
+    # Linia pozioma odpowiadająca ACF = 0.
+    ggplot2::geom_hline(
+      yintercept = 0,
+      colour = wyglad$kolory$granica,
+      linewidth = 0.3
+    ) +
+
+    # Górna granica orientacyjnego przedziału.
+    ggplot2::geom_hline(
+      data = granice,
+      ggplot2::aes(yintercept = granica),
+      colour = wyglad$kolory$granica,
+      linetype = "dashed",
+      linewidth = 0.35
+    ) +
+
+    # Dolna granica orientacyjnego przedziału.
+    ggplot2::geom_hline(
+      data = granice,
+      ggplot2::aes(yintercept = -granica),
+      colour = wyglad$kolory$granica,
+      linetype = "dashed",
+      linewidth = 0.35
+    ) +
+
+    # Współczynniki ACF.
+    # Kolor zależy od tego, czy opóźnienie
+    # jest wielokrotnością 12 miesięcy.
+    ggplot2::geom_segment(
+      ggplot2::aes(
+        xend = opoznienie,
+        y = 0,
+        yend = acf,
+        colour = roczne
+      ),
+      linewidth = wyglad$wykres$grubosc_linii,
+      na.rm = TRUE
+    ) +
+
+    # Informacja dla szeregu o stałych wartościach,
+    # dla którego ACF nie jest określona.
+    ggplot2::geom_text(
+      data = dplyr::filter(
+        dane_acf,
+        is.na(acf),
+        opoznienie == 1L
+      ),
+      x = lag_max / 2,
+      y = 0.32,
+      label = "ACF nieokreślona",
+      size = 3
+    ) +
+
+    # Kolory zgodne z paletą raportu.
+    ggplot2::scale_colour_manual(
+      values = c(
+        "FALSE" = wyglad$kolory$acf,
+        "TRUE" = wyglad$kolory$acf_roczne
+      ),
+      guide = "none"
+    ) +
+
+    # Opóźnienia w miesiącach.
+    ggplot2::scale_x_continuous(
+      breaks = seq(
+        0,
+        lag_max,
+        by = okres_sezonowy / 2L
+      ),
+      limits = c(0, lag_max)
+    ) +
+
+    # Jednolita skala autokorelacji.
+    ggplot2::scale_y_continuous(
+      limits = c(-1, 1),
+      breaks = seq(-1, 1, by = 0.5)
+    ) +
+
+    ggplot2::labs(
+      x = "Opóźnienie (miesiące)",
+      y = "ACF"
+    ) +
+
+    motyw_szeregow
+}
+
+```
+
+\newpage
+
+# Dane
+
+## Charakterystyka danych
+
+`r opis_zrodla` Analiza obejmuje okres od `r miesiac(min(miesiace))` do
+`r miesiac(max(miesiace))`. Obserwacje są miesięczne, a kwoty wyrażamy w
+miliardach USD.
+
+```{r charakterystyka-dane, include=FALSE}
+# OBLICZENIE WSKAŹNIKÓW | przygotowujemy dwukolumnową ramkę
+# `tabela_charakterystyka` bez tworzenia obiektu LaTeX.
+
+tabela_charakterystyka <- tibble(
+    Wskaźnik = c(
+      "Miesiące",
+      "Wiersze w pliku źródłowym",
+      "Kody składowe",
+      "Kategorie bazowe",
+      "Obserwacje miesiąc × kategoria",
+      "Brakujące obserwacje składowe",
+      "Szeregi w hierarchii"
+    ),
+    Wartość = c(
+      n_miesiecy,
+      nrow(dane),
+      n_distinct(pozycje$kod),
+      n_kategorii,
+      nrow(skladniki),
+      nrow(brakujace_wiersze),
+      nrow(wezly)
+    )
+  )
+```
+
+```{r charakterystyka}
+# PREZENTACJA TABELI | wyświetlamy gotowe wskaźniki bez wyróżniania.
+# Funkcja `tabela_praca` kotwiczy tabelę przy tym miejscu w PDF.
+
+tabela_praca(
+  dane = tabela_charakterystyka,
+  podpis = "Charakterystyka zbioru danych",
+  miejsca_dz = 0,
+  wyroznienie = "brak",
+  zrodlo = "Opracowanie własne"
+)
+```
+
+Dane źródłowe obejmują 140 obserwacji miesięcznych, od marca 2015 r. do
+października 2026 r. Dziewięć kodów składowych zagregowano do siedmiu
+kategorii bazowych, uzyskując łącznie 980 obserwacji na najniższym
+poziomie hierarchii. Kontrola kompletności nie wykazała brakujących
+obserwacji dla analizowanych kodów w rozpatrywanym okresie.
+
+Na potrzeby prognozowania hierarchicznego kategorie bazowe przypisano do
+dwóch grup pośrednich, obejmujących odpowiednio trzy i cztery kategorie.
+Podział ten przyjęto według kryterium ilościowego, dążąc do uzyskania
+agregatów o zbliżonej skali wpływów, a nie na podstawie podobieństwa
+ekonomicznego poszczególnych kategorii. Suma obu grup wyznacza najwyższy
+poziom hierarchii, odpowiadający całkowitym dochodom federalnym.
+Ostatecznie otrzymano strukturę obejmującą 10 szeregów czasowych na
+trzech poziomach agregacji: ogółem, grup i kategorii bazowych.
+
+```{r sklad-grup-dane, include=FALSE}
+# PRZYGOTOWANIE TABELI | sortujemy grupy i kategorie,
+# nadając polskie nagłówki; bez renderowania.
+
+tabela_przypisanie_grup <- mapa_grup |>
+  arrange(grupa, kategoria) |>
+  select(Grupa = grupa, Kategoria = kategoria)
+```
+
+\newpage
+
+## Podział chronologiczny
+
+```{r podzial-dane, include=FALSE}
+
+# PODZIAŁ CHRONOLOGICZNY | odkładamy ostatnie `h_walidacji` miesięcy
+# na walidację, a resztę na trening — jednakowo dla wszystkich węzłów.
+# Tworzymy `trening`, `walidacja`, daty oraz ramkę okresów do tabeli.
+
+n_trening <- n_miesiecy - h_walidacji
+stopifnot(
+  "Po wydzieleniu walidacji trening musi obejmować co najmniej trzy cykle sezonowe." =
+    n_trening >= 3L * okres_sezonowy
+)
+
+daty_trening <- head(miesiace, n_trening)
+daty_walidacji <- tail(miesiace, h_walidacji)
+
+trening <- filter(dane_ts, data %in% daty_trening)
+walidacja <- filter(dane_ts, data %in% daty_walidacji)
+
+zakres <- function(x) paste(miesiac(min(x)), miesiac(max(x)), sep = " – ")
+tabela_podzial <- tibble(
+
+  )
+
+tabela_podział <- tibble(
+    Część = c("Trening", "Walidacja"),
+    Okres = c(zakres(daty_trening), zakres(daty_walidacji)),
+    Miesiące = c(n_trening, h_walidacji)
+  )
+
+
+
+```
+
+```{r podzial}
+# PREZENTACJA PODZIAŁU | zestawiamy okres treningu i walidacji.
+# Tabela jest zakotwiczona w PDF przez `tabela_raportu`.
+
+tabela_praca(
+  dane = tabela_podział,
+  podpis = "Podział na częśc treningową i walidacyjną",
+  miejsca_dz = 0,
+  wyroznienie = "brak",
+  zrodlo = "Opracowanie własne"
+)
+```
+
+Zbiór danych podzielono chronologicznie na część treningową obejmującą
+128 miesięcy (marzec 2015 r. – październik 2025 r.) oraz część
+walidacyjną obejmującą ostatnie 12 miesięcy (listopad 2025 r. –
+październik 2026 r.). Zastosowanie podziału chronologicznego pozwala
+odtworzyć rzeczywiste warunki prognozowania, w których przewidywane są
+wartości przyszłe na podstawie wcześniejszych obserwacji.
+
+Horyzont walidacji równy 12 miesiącom odpowiada pełnemu cyklowi
+sezonowemu analizowanych szeregów. Umożliwia to ocenę dokładności
+prognoz w poszczególnych miesiącach roku, z uwzględnieniem potencjalnych
+wahań sezonowych. Wszystkie modele dopasowywane są wyłącznie do danych
+treningowych, natomiast obserwacje z okresu walidacyjnego wykorzystywane
+są do oceny jakości otrzymanych prognoz. Identyczny podział zastosowano
+dla wszystkich poziomów hierarchii, zapewniając porównywalność wyników
+pomiędzy poszczególnymi szeregami i metodami prognozowania.
+
+```{r ustawienia-paneli-dane, include=FALSE}
+# IDENTYFIKACJA PANELI | wzbogacamy węzły o etykiety oraz grupujemy je
+# w zestawy o liczbie paneli określonej w `wyglad`.
+# `z_panelami()` dodaje do szeregów nazwy węzłów i indeks typu Date.
+
+wezly <- wezly |>
+  mutate(
+    etykieta_panelu = if_else(poziom == "Kategorie",
+                             paste0(wezel, " (", as.character(grupa), ")"), wezel),
+    panel = factor(etykieta_panelu, levels = unique(etykieta_panelu))
+  )
+
+na_rysunek <- wyglad$wykres$kolumny * wyglad$wykres$wiersze
+zestawy_paneli <- split(wezly$id_wezla, ceiling(wezly$id_wezla / na_rysunek))
+wezly_omawiane <- wezly |>
+  filter(poziom == "Ogółem" |
+           (poziom == "Kategorie" & wezel %in% wyglad$kategorie_do_omowienia))
+
+
+z_panelami <- function(x) {
+  as_tibble(x) |>
+    inner_join(wezly, by = c("grupa", "kategoria")) |>
+    mutate(miesiac = as.Date(data))
+}
+pierwszy_miesiac_walidacji <- as.Date(min(daty_walidacji))
+```
+
+```{r ustawienia-paneli-styl, include=FALSE}
+# DEFINICJE STYLU | funkcje `panele_szeregow()` i `motyw_szeregow`
+# dostarczają spójnego formatu wszystkich wykresów.
+# `tlo_walidacji` i `granica_walidacji` oznaczają obszar testowy.
+# To przygotowanie warstw ggplot, nie renderowanie rysunku.
+
+panele_szeregow <- function(skale = "fixed") {
+  facet_wrap(vars(panel), scales = skale, ncol = wyglad$wykres$kolumny,
+             labeller = labeller(panel = label_wrap_gen(width = wyglad$wykres$zawijanie_etykiet)))
+}
+motyw_szeregow <- theme_minimal(base_size = wyglad$wykres$tekst) +
+  theme(
+    text = element_text(colour = wyglad$kolory$tekst),
+    axis.text = element_text(colour = wyglad$kolory$tekst),
+    panel.grid.major = element_line(colour = wyglad$kolory$siatka, linewidth = 0.25),
+    panel.grid.minor = element_blank(),
+    strip.background = element_rect(fill = wyglad$kolory$panel, colour = NA),
+    strip.text = element_text(face = "bold", colour = wyglad$kolory$tekst),
+    panel.spacing = grid::unit(0.85, "lines"),
+    legend.position = wyglad$wykres$pozycja_legendy
+  )
+
+
+tlo_walidacji <- annotate(
+  "rect", xmin = pierwszy_miesiac_walidacji, xmax = as.Date(Inf, origin = "1970-01-01"),
+  ymin = -Inf, ymax = Inf, fill = wyglad$kolory$walidacja
+)
+granica_walidacji <- geom_vline(
+  xintercept = pierwszy_miesiac_walidacji,
+  colour = wyglad$kolory$granica, linetype = "dashed", linewidth = 0.35
+)
+```
+
+\newpage
+
+## Udział kategorii w dochodach ogółem
+
+W celu scharakteryzowania struktury dochodów federalnych USA wyznaczono
+procentowe udziały poszczególnych kategorii w łącznych wpływach.
+Obliczenia przeprowadzono na podstawie skumulowanych wartości dochodów z
+pełnych lat kalendarzowych należących do okresu treningowego
+(2016–2024). Udział każdej kategorii określono jako stosunek sumy jej
+wpływów do sumy wpływów wszystkich siedmiu kategorii bazowych w tym
+samym okresie. Otrzymane wyniki przedstawiono na rysunku 1.
+
+```{r udzialy-kategorii-dane, include=FALSE}
+# UDZIAŁY KATEGORII | wybieramy pełne lata treningu, sumujemy
+# dochody w kategoriach i obliczamy ich udział w sumie.
+# Tworzymy ramkę tabeli i identyfikujemy kategorię największą.
+
+pelne_lata <- tibble(data = daty_trening, rok = as.integer(format(daty_trening, "%Y"))) |>
+  group_by(rok) |>
+  filter(n() == okres_sezonowy) |>
+  ungroup()
+
+if (nrow(pelne_lata) > 0L) {
+  udzialy <- skladniki |>
+    semi_join(pelne_lata, by = "data") |>
+    group_by(grupa, kategoria) |>
+    summarise(lacznie = sum(mld_usd), .groups = "drop") |>
+    arrange(desc(lacznie))
+  suma_wplywow <- sum(udzialy$lacznie)
+  if (suma_wplywow != 0) {
+    udzialy <- mutate(udzialy, udzial = lacznie / suma_wplywow)
+    tabela_udzialy_kategorii <- transmute(udzialy, Kategoria = kategoria, Grupa = grupa,
+                `Wpływy (mld USD)` = liczba(lacznie),
+                `Udział (%)` = liczba(100 * udzial))
+    podpis_udzialy_kategorii <- sprintf("Struktura wpływów w pełnych latach treningowych (%d-%d)",
+              min(pelne_lata$rok), max(pelne_lata$rok))
+    pierwsza <- slice_head(udzialy, n = 1L)
+  }
+}
+```
+
+```{r udzialy-kategorii-wykres, results='asis'}
+
+# ============================================================
+# STRUKTURA DOCHODÓW FEDERALNYCH USA
+# ============================================================
+
+# Wejście:
+# udzialy$kategoria — nazwy kategorii dochodów,
+# udzialy$lacznie   — skumulowane dochody w mld USD.
+#
+# Wykres przedstawia udziały procentowe kategorii
+# w całkowitych dochodach w pełnych latach treningowych.
+#
+# Zachowujemy stylistykę wariantu A:
+# - biały, pogrubiony tekst na dużych segmentach,
+# - procenty od 5%,
+# - legenda po prawej,
+# - pusty środek pierścienia,
+# - automatyczny podpis i źródło.
+
+if (nrow(pelne_lata) > 0L && suma_wplywow > 0) {
+
+  wykres_kolowy(
+    dane = udzialy,
+    podpis = "Struktura dochodów federalnych USA według kategorii",
+    zrodlo = "Opracowanie własne na podstawie danych U.S. Treasury.",
+    kategoria = "kategoria",
+    wartosc = "lacznie",
+    typ = "pierscieniowy",
+    kolory = paleta,
+    sortuj = TRUE,
+    procenty_legenda = FALSE,
+    procenty_wycinki = TRUE,
+    prog_etykiety = 0.05,
+    napis_srodka = NULL,
+    legenda = "right",
+    zawijanie_legendy = 28,
+    szerokosc = 7,
+    wysokosc = 4.8,
+    zatrzymaj_pozycje = TRUE
+  )
+
+}
+
+```
+
+Analiza struktury dochodów wskazuje na znaczną koncentrację wpływów w
+dwóch największych kategoriach. Największy udział mają podatki od osób
+fizycznych (49,7%), a następnie wpływy z tytułu ubezpieczeń społecznych
+i emerytur (34,7%). Kategorie te odpowiadają łącznie za 84,4%
+analizowanych dochodów federalnych USA.
+
+Trzecią pod względem wielkości kategorię stanowią podatki od
+przedsiębiorstw, których udział wynosi 8,5%. Pozostałe cztery kategorie
+mają znacznie mniejsze znaczenie w strukturze wpływów, odpowiadając
+łącznie za 7,1% dochodów. Najmniejszy udział odnotowano w przypadku
+podatków od spadków i darowizn (0,6%).
+
+Zaobserwowana dysproporcja wskazuje na istotne różnice skali pomiędzy
+szeregami czasowymi na najniższym poziomie hierarchii. Ma to znaczenie
+dla późniejszej oceny jakości prognoz, ponieważ miary błędów wyrażone w
+jednostkach bezwzględnych, takie jak MAE i RMSE, zależą od skali
+prognozowanych wartości. Z tego względu w analizie porównawczej zasadne
+jest uwzględnienie również miary MASE, umożliwiającej ocenę błędów
+względem prognoz metody odniesienia.
+
+## Hierarchia
+
+```{r hierarchia-dane, include=FALSE}
+# DANE DO SCHEMATU | na podstawie gotowego `mapa_grup` ustalamy
+# pozycje węzłów, udziały grup w treningu i kolory etykiet.
+# Nie nadpisujemy `wezly` używanego do prognozowania.
+
+# ============================================================
+# 1. PRZYGOTOWANIE WĘZŁÓW DO WIZUALIZACJI
+# ============================================================
+
+# Korzystamy z istniejącej mapa_grup.
+# Nie definiujemy kategorii ponownie.
+#
+# Obiekt wezly z modelowania pozostaje bez zmian.
+#
+# Współrzędne y określają jedynie położenie
+# kategorii na schemacie.
+
+stopifnot(
+  nrow(mapa_grup) == 7L,
+  sum(mapa_grup$grupa == "Grupa 1") == 3L,
+  sum(mapa_grup$grupa == "Grupa 2") == 4L
+)
+
+wezly_schemat <- mapa_grup |>
+  mutate(
+    y = c(8, 7, 6, 4, 3, 2, 1),
+    etykieta = stringr::str_wrap(kategoria, width = 26)
+  )
+
+# ============================================================
+# 2. OBLICZENIE UDZIAŁÓW GRUP
+# ============================================================
+
+# Używamy tego samego horyzontu walidacji,
+# który wykorzystujemy w modelowaniu.
+
+daty <- sort(unique(skladniki$data))
+
+if (length(daty) <= h_walidacji) {
+  stop("Za mało obserwacji do wyznaczenia treningu.")
+}
+
+koniec_treningu <- daty[
+  length(daty) - h_walidacji
+]
+
+# Obiekt skladniki zawiera już kolumnę grupa.
+# Nie wykonujemy ponownego inner_join().
+
+udzialy_grup <- skladniki |>
+  filter(data <= koniec_treningu) |>
+  group_by(grupa) |>
+  summarise(
+    suma_dochodow = sum(mld_usd),
+    .groups = "drop"
+  )
+
+suma_grup <- sum(udzialy_grup$suma_dochodow)
+
+if (!is.finite(suma_grup) || suma_grup == 0) {
+  stop("Nie można obliczyć udziałów grup.")
+}
+
+udzialy_grup <- udzialy_grup |>
+  mutate(
+    udzial = 100 * suma_dochodow / suma_grup,
+    etykieta_grupy = paste0(
+      grupa, "\n",
+      formatC(
+        udzial,
+        format = "f",
+        digits = 1,
+        decimal.mark = ","
+      ),
+      "%"
+    )
+  )
+
+# ============================================================
+# 3. POZYCJE GRUP NA SCHEMACIE
+# ============================================================
+
+grupy_schemat <- wezly_schemat |>
+  group_by(grupa) |>
+  summarise(
+    y_min = min(y),
+    y_max = max(y),
+    y = (y_min + y_max) / 2,
+    .groups = "drop"
+  ) |>
+  left_join(
+    udzialy_grup,
+    by = "grupa"
+  )
+
+# Pozycja głównego agregatu
+srodek <- mean(grupy_schemat$y)
+
+# ============================================================
+# 4. KOLORY KATEGORII
+# ============================================================
+
+# Wykorzystujemy istniejącą paletę projektu.
+# Każda kategoria otrzymuje jeden stały kolor.
+
+paleta_hierarchii <- setNames(
+  rep("#000000", 7)  ,
+  wezly_schemat$kategoria
+)
+```
+
+```{r hierarchia, echo=FALSE, fig.width=8, fig.height=5, fig.align="center", fig.cap="Struktura hierarchiczna miesięcznych dochodów federalnych USA. Udziały wyznaczono na podstawie okresu treningowego. Źródło: opracowanie własne na podstawie danych U.S. Treasury."}
+# RENDEROWANIE SCHEMATU | rysujemy trzy poziomy bez nowych przeliczeń:
+# korzeń → dwie grupy → siedem kategorii. Pozycje pobieramy z
+# `wezly_schemat` i `grupy_schemat`; etykiety % z `udzialy_grup`.
+# Szare odcinki kodują relacje rodzic–dziecko, kolory rozróżniają kategorie.
+
+# ============================================================
+# 5. WIZUALIZACJA HIERARCHII
+# ============================================================
+
+ggplot() +
+
+  # ----------------------------------------------------------
+  # Połączenia: OGÓŁEM -> GRUPY
+  # ----------------------------------------------------------
+
+  annotate(
+    "segment",
+    x = 0.8, xend = 1.9,
+    y = srodek, yend = srodek,
+    colour = "grey65"
+  ) +
+
+  annotate(
+    "segment",
+    x = 1.9, xend = 1.9,
+    y = min(grupy_schemat$y),
+    yend = max(grupy_schemat$y),
+    colour = "grey65"
+  ) +
+
+  geom_segment(
+    data = grupy_schemat,
+    aes(
+      x = 1.9, xend = 3.8,
+      y = y, yend = y
+    ),
+    colour = "grey65"
+  ) +
+
+  # ----------------------------------------------------------
+  # Połączenia: GRUPY -> KATEGORIE
+  # ----------------------------------------------------------
+
+  geom_segment(
+    data = grupy_schemat,
+    aes(
+      x = 3.8, xend = 3.8,
+      y = y_min, yend = y_max
+    ),
+    colour = "grey65"
+  ) +
+
+  geom_segment(
+    data = wezly_schemat,
+    aes(
+      x = 3.8, xend = 4.3,
+      y = y, yend = y
+    ),
+    colour = "grey65"
+  ) +
+
+  # ----------------------------------------------------------
+  # Poziom 0: DOCHODY OGÓŁEM
+  # ----------------------------------------------------------
+
+  annotate(
+    "label",
+    x = 0.8, y = srodek,
+    label = "Dochody\nogółem",
+    fill = "#1B365D",
+    colour = "white",
+    fontface = "bold",
+    size = 4
+  ) +
+
+  # ----------------------------------------------------------
+  # Poziom 1: GRUPY I ICH UDZIAŁY
+  # ----------------------------------------------------------
+
+  geom_label(
+    data = grupy_schemat,
+    aes(
+      x = 2.8,
+      y = y,
+      label = etykieta_grupy
+    ),
+    fill = "#EEF2F6",
+    colour = "#1B365D",
+    fontface = "bold",
+    size = 3.8,
+    label.padding = grid::unit(0.25, "lines")
+  ) +
+
+  # ----------------------------------------------------------
+  # Poziom 2: KATEGORIE BAZOWE
+  # ----------------------------------------------------------
+
+  geom_label(
+    data = wezly_schemat,
+    aes(
+      x = 4.3,
+      y = y,
+      label = etykieta,
+      colour = kategoria
+    ),
+    hjust = 0,
+    fill = "white",
+    fontface = "bold",
+    size = 3.8,
+    show.legend = FALSE
+  ) +
+
+  # ----------------------------------------------------------
+  # FORMATOWANIE
+  # ----------------------------------------------------------
+
+  scale_colour_manual(
+    values = paleta_hierarchii
+  ) +
+
+  coord_cartesian(
+    xlim = c(0, 7.5),
+    ylim = c(0.5, 8.5)
+  ) +
+
+  theme_void() +
+
+  theme(
+    plot.margin = margin(15, 15, 15, 15)
+  )
+```
+
+Grupa 1 odpowiada za 52,6% całkowitych wpływów, a Grupa 2 za pozostałe
+47,4% w okresie treningowym.
+
+```{r zgodnosc-sumy-dane, include=FALSE}
+# PRZELICZENIE | wyznaczamy maksymalną bezwzględną różnicę
+# między sumą kodów a opublikowaną sumą miesięczną.
+
+if (nrow(kontrola_sumy) > 0L) {
+  roznica <- max(abs(kontrola_sumy$opublikowana - kontrola_sumy$suma_kodow))
+}
+```
+
+```{r zgodnosc-sumy, results="asis"}
+# WYNIK KONTROLI | wypisujemy jedno zdanie do dokumentu.
+# `results="asis" pozwala interpretować je jako tekst Markdown.
+
+if (nrow(kontrola_sumy) > 0L) {
+  cat(sprintf(
+    "Opublikowaną sumę wykorzystujemy do kontroli danych. Dla %d porównanych miesięcy największa różnica bezwzględna wynosi %s USD.\n",
+    nrow(kontrola_sumy), liczba(roznica, 4)
+  ))
+}
+```
+
+\newpage
+
+# Przebiegi historyczne i sezonowość
+
+## Przebiegi miesięczne
+
+Zacienienie wskazuje okres walidacji. Każdy panel ma własną skalę
+pionową, dzięki czemu widać zmiany również w mniejszych kategoriach.
+
+```{r historia-dane, include=FALSE}
+# DANE HISTORYCZNE | dołączamy do `dane_ts` nazwy węzłów
+# i konwertujemy indeks miesięczny na daty dla osi wykresów.
+
+historia <- z_panelami(dane_ts)
+```
+
+### Dochody ogółem
+
+Na najwyższym poziomie hierarchii znajduje się szereg dochodów ogółem,
+stanowiący sumę wszystkich siedmiu kategorii bazowych. Analiza jego
+przebiegu pozwala ocenić długookresowe zmiany łącznych wpływów,
+występowanie wahań sezonowych oraz obserwacji odstających.
+
+```{r historia-ogolem, results='asis'}
+id_ogolem <- wezly |>
+  dplyr::filter(poziom == "Ogółem") |>
+  dplyr::pull(id_wezla)
+
+wykres_szeregow(
+  dane = historia,
+  id_wezlow = id_ogolem,
+  podpis = "Miesięczne dochody federalne USA ogółem",
+  data_walidacji = pierwszy_miesiac_walidacji,
+  kolumny = 1,
+  wiersze = 1,
+  skale = "fixed",
+  szerokosc = 7,
+  wysokosc = 3.3
+)
+```
+
+\newpage
+
+### Grupy pośrednie
+
+Na drugim poziomie hierarchii znajdują się dwa agregaty pośrednie. Ich
+zestawienie umożliwia porównanie skali, zmienności i przebiegu wpływów w
+obu grupach. Zastosowano wspólną skalę pionową, aby umożliwić
+bezpośrednie porównanie wartości.
+
+```{r historia-grupy, results='asis'}
+id_grupy <- wezly |>
+  dplyr::filter(poziom == "Grupy") |>
+  dplyr::pull(id_wezla)
+
+wykres_szeregow(
+  dane = historia,
+  id_wezlow = id_grupy,
+  podpis = "Miesięczne wpływy w dwóch grupach hierarchii",
+  data_walidacji = pierwszy_miesiac_walidacji,
+  kolumny = 2,
+  wiersze = 1,
+  skale = "fixed",
+  szerokosc = 7,
+  wysokosc = 3.5
+)
+```
+
+\newpage
+
+### Kategorie bazowe — Grupa 1
+
+Grupa 1 obejmuje podatki od osób fizycznych, akcyzę oraz podatki od
+spadków i darowizn. Ze względu na znaczne różnice skali poszczególnych
+kategorii zastosowano niezależne skale pionowe.
+
+```{r historia-kategorie-grupa1, results='asis'}
+id_grupa1 <- wezly |>
+  dplyr::filter(
+    poziom == "Kategorie",
+    as.character(grupa) == "Grupa 1"
+  ) |>
+  dplyr::pull(id_wezla)
+
+wykres_szeregow(
+  dane = historia,
+  id_wezlow = id_grupa1,
+  podpis = "Miesięczne wpływy kategorii bazowych Grupy 1",
+  data_walidacji = pierwszy_miesiac_walidacji,
+  kolumny = 2,
+  wiersze = 2,
+  skale = "free_y",
+  szerokosc = 7,
+  wysokosc = 4.8
+)
+```
+
+\newpage
+
+### Kategorie bazowe — Grupa 2
+
+Grupa 2 obejmuje wpływy z ubezpieczeń społecznych i emerytur, podatki od
+przedsiębiorstw, cła oraz pozostałe dochody. Niezależne skale pionowe
+pozwalają przedstawić zmienność każdego szeregu pomimo różnic w poziomie
+wpływów.
+
+```{r historia-kategorie-grupa2, results='asis'}
+id_grupa2 <- wezly |>
+  dplyr::filter(
+    poziom == "Kategorie",
+    as.character(grupa) == "Grupa 2"
+  ) |>
+  dplyr::pull(id_wezla)
+
+wykres_szeregow(
+  dane = historia,
+  id_wezlow = id_grupa2,
+  podpis = "Miesięczne wpływy kategorii bazowych Grupy 2",
+  data_walidacji = pierwszy_miesiac_walidacji,
+  kolumny = 2,
+  wiersze = 2,
+  skale = "free_y",
+  szerokosc = 7,
+  wysokosc = 4.8
+)
+```
+
+## Wykresy sezonowe
+
+Każda linia przedstawia jeden pełny rok treningowy. Ciemniejsze linie
+odpowiadają późniejszym latom. Zestawienie tych samych miesięcy
+pokazuje, czy moment szczytu powtarza się mimo różnic w poziomie wpływów
+między latami.
+
+```{r sezonowosc-dane, include=FALSE}
+# DANE SEZONOWE | wybieramy pełne lata treningowe,
+# identyfikujemy miesiąc kalendarzowy i definiujemy etykiety miesięcy.
+
+sezony <- trening |>
+  z_panelami() |>
+  inner_join(pelne_lata, by = "data") |>
+  mutate(nr_miesiaca = as.integer(format(miesiac, "%m")))
+
+nazwy_miesiecy <- c("sty", "lut", "mar", "kwi", "maj", "cze",
+                   "lip", "sie", "wrz", "paź", "lis", "gru")
+```
+
+### Dochody ogółem
+
+Na poziomie ogółem analizujemy przebieg sezonowy łącznych miesięcznych
+wpływów.
+
+```{r sezonowosc-ogolem, results='asis'}
+wykres_sezonowosci(
+  dane = sezony,
+  id_wezlow = wezly$id_wezla[wezly$poziom == "Ogółem"],
+  podpis = "Sezonowość miesięcznych dochodów federalnych USA ogółem",
+  kolumny = 1,
+  wiersze = 1,
+  skale = "fixed",
+  kolory = c("#C5D1DD", "#355A85"),
+  wyroznij_najnowszy_rok = TRUE,
+  szerokosc = 7,
+  wysokosc = 3.4
+)
+```
+
+### Grupy pośrednie
+
+Porównujemy sezonowość dwóch grup przy wspólnej skali pionowej.
+
+```{r sezonowosc-grupy, results='asis'}
+wykres_sezonowosci(
+  dane = sezony,
+  id_wezlow = wezly$id_wezla[wezly$poziom == "Grupy"],
+  podpis = "Sezonowość miesięcznych wpływów w grupach hierarchii",
+  kolumny = 2,
+  wiersze = 1,
+  skale = "fixed",
+  kolory = c("#C5D1DD", "#355A85"),
+  wyroznij_najnowszy_rok = TRUE,
+  szerokosc = 7,
+  wysokosc = 3.6
+)
+```
+
+### Kategorie bazowe — Grupa 1
+
+```{r sezonowosc-kategorie-grupa1, results='asis'}
+wykres_sezonowosci(
+  dane = sezony,
+  id_wezlow = wezly$id_wezla[
+    wezly$poziom == "Kategorie" & as.character(wezly$grupa) == "Grupa 1"
+  ],
+  podpis = "Sezonowość kategorii bazowych Grupy 1",
+  kolumny = 2,
+  wiersze = 2,
+  skale = "free_y",
+  kolory = c("#C5D1DD", "#355A85"),
+  wyroznij_najnowszy_rok = TRUE,
+  szerokosc = 7,
+  wysokosc = 4.8
+)
+```
+
+### Kategorie bazowe — Grupa 2
+
+```{r sezonowosc-kategorie-grupa2, results='asis'}
+wykres_sezonowosci(
+  dane = sezony,
+  id_wezlow = wezly$id_wezla[
+    wezly$poziom == "Kategorie" & as.character(wezly$grupa) == "Grupa 2"
+  ],
+  podpis = "Sezonowość kategorii bazowych Grupy 2",
+  kolumny = 2,
+  wiersze = 2,
+  skale = "free_y",
+  kolory = c("#C5D1DD", "#355A85"),
+  wyroznij_najnowszy_rok = TRUE,
+  szerokosc = 7,
+  wysokosc = 4.8
+)
+```
+
+```{r wnioski-sezonowe-dane, include=FALSE}
+# WNIOSKI SEZONOWE | wyznaczamy dla każdego węzła miesiąc
+# powtarzającego się maksimum, jeżeli jest jednoznaczny.
+
+szczyty_roku <- sezony |>
+  group_by(panel, id_wezla, rok) |>
+  filter(mld_usd == max(mld_usd)) |>
+  filter(n() == 1L) |>
+  ungroup() |>
+  count(panel, id_wezla, nr_miesiaca) |>
+  group_by(panel, id_wezla) |>
+  filter(n == max(n), n > 1L) |>
+  filter(n() == 1L) |>
+  ungroup() |>
+  inner_join(select(wezly_omawiane, id_wezla, wezel), by = "id_wezla")
+pelne_nazwy_miesiecy <- c("styczniu", "lutym", "marcu", "kwietniu", "maju", "czerwcu",
+                          "lipcu", "sierpniu", "wrześniu", "październiku", "listopadzie", "grudniu")
+```
+
+```{r wnioski-sezonowe, results="asis"}
+# INTERPRETACJA SEZONOWOŚCI | zamieniamy gotowe wyniki w zdania
+# z liczbą lat i nazwą miesiąca; wyniki pojawiają się przy wykresach.
+
+for (i in seq_len(nrow(szczyty_roku))) {
+  w <- szczyty_roku[i, ]
+  cat(sprintf(
+    "W szeregu „%s” roczny szczyt najczęściej wypadał w %s (%d z %d pełnych lat treningowych).\n\n",
+    w$wezel, pelne_nazwy_miesiecy[w$nr_miesiaca], w$n, n_distinct(pelne_lata$rok)
+  ))
+}
+```
+
+# Autokorelacja szeregów treningowych
+
+Funkcja autokorelacji (ACF) pokazuje zależność między obserwacjami
+oddalonymi o określoną liczbę miesięcy. Wysokie dodatnie wartości dla
+małych opóźnień, które stopniowo maleją, mogą wskazywać na trend lub
+inną trwałą zależność w czasie. Lokalne maksima przy 12, 24 i kolejnych
+wielokrotnościach 12 miesięcy sugerują sezonowość roczną. Oba wzorce
+mogą występować jednocześnie. [Hyndman i Athanasopoulos, sekcja o
+autokorelacji](https://otexts.com/fpp3/graphics.html#autocorrelation).
+
+```{r dane-acf, include=FALSE}
+# OBLICZANIE ACF | dla każdej serii wyznaczamy korelacje
+# dla opóźnień od 1 do ustalonego maksimum, zaznaczamy wielokrotności
+# 12 miesięcy i orientacyjną granicę 95%; wynik `acf_trening`.
+
+oblicz_acf <- function(y) {
+  lag_max <- min(wyglad$cykle_acf * okres_sezonowy, length(y) - 1L)
+  acf_y <- if (all(y == y[1L])) {
+    rep(NA_real_, lag_max)
+  } else {
+    as.numeric(stats::acf(y, lag.max = lag_max, plot = FALSE)$acf)[-1L]
+  }
+  tibble(
+    opoznienie = seq_len(lag_max),
+    acf = acf_y,
+    roczne = opoznienie %% okres_sezonowy == 0L,
+    granica = qnorm(0.975) / sqrt(length(y))
+  )
+}
+
+acf_trening <- z_panelami(trening) |>
+  arrange(data) |>
+  group_by(id_wezla) |>
+  group_modify(~ oblicz_acf(.x$mld_usd)) |>
+  ungroup() |>
+  left_join(wezly, by = "id_wezla")
+```
+
+Kolorem wyróżniamy wielokrotności roku. Przerywane linie poziome
+oznaczają przybliżone granice 95% dla pojedynczego opóźnienia przy
+założeniu białego szumu. Kształt całej funkcji pomaga w interpretacji,
+ponieważ pojedyncze przekroczenie może wystąpić przypadkowo.
+
+```{r acf-ogolem, results='asis'}
+# ACF najwyższego poziomu hierarchii.
+# Jeden wykres pokazuje zależności dla 1–36 miesięcy.
+
+p_acf_ogolem <- acf_trening |>
+  dplyr::filter(poziom == "Ogółem") |>
+  wykres_acf() +
+  ggplot2::facet_wrap(
+    ggplot2::vars(panel),
+    ncol = 1
+  )
+
+renderuj_rysunki_pracy(
+  wykresy = list(p_acf_ogolem),
+  podpis = "Autokorelacja miesięcznych dochodów federalnych USA ogółem",
+  zrodlo = "Opracowanie własne na podstawie danych U.S. Treasury.",
+  szerokosc = 7,
+  wysokosc = 3.2
+)
+```
+
+Podwyższone wartości autokorelacji przy opóźnieniach 12, 24 i 36 miesięcy wskazują na sezonowość roczną. Wzorzec widoczny przy krótszych opóźnieniach również powtarza się co 12 miesięcy, o czym świadczą sekwencje 3, 9, 12 oraz 15, 21, 24 i 27, 33, 36. Bardzo powolne zmniejszanie wartości funkcji ACF wskazuje na istnienie trendu w danych.  
+
+**Wniosek** : Zaobserwowany wzorzec uzasadnia uwzględnienie sezonowości o okresie 12 miesięcy w modelach prognostycznych.
+
+```{r acf-grupy, results='asis'}
+# Porównanie ACF dwóch agregatów pośrednich.
+# Wspólne skale osi umożliwiają porównanie korelacji.
+
+p_acf_grupy <- acf_trening |>
+  dplyr::filter(poziom == "Grupy") |>
+  wykres_acf() +
+  ggplot2::facet_wrap(
+    ggplot2::vars(panel),
+    ncol = 2
+  )
+
+renderuj_rysunki_pracy(
+  wykresy = list(p_acf_grupy),
+  podpis = "Autokorelacja miesięcznych wpływów w dwóch grupach hierarchii",
+  zrodlo = "Opracowanie własne na podstawie danych U.S. Treasury.",
+  szerokosc = 7,
+  wysokosc = 3.5
+)
+```
+
+- **GRUPA 1**
+    Najwyższą wartość autokorelacji odnotowano przy opóźnieniu 12 miesięcy (około 0,57). Lokalne maksima występują również przy opóźnieniach 24 i 36 miesięcy, gdzie autokorelacja wynosi około 0,4.
+    **Wniosek** Powtarzanie się lokalnych maksimów co 12 miesięcy wskazuje na sezonowość roczną i uzasadnia uwzględnienie modeli sezonowych w porównaniu metod prognostycznych.Powoli malejący wykres acf wskazuje również na trend.
+- **Grupa 2**
+    Najwyższe wartości autokorelacji występują przy opóźnieniach 12, 24 i 36 miesięcy i wynoszą odpowiednio około 0,79, 0,61 i 0,44. Maksima sezonowe maleją wraz ze wzrostem opóźnienia.
+    **Wniosek** Wykres wskazuje na sezonowość roczną. Wyższa autokorelacja przy opóźnieniach 12 i 24 miesięcy oznacza, że obserwacje z tego samego miesiąca oddalone o rok lub dwa lata są w tej grupie silniej skorelowane niż w grupie 1.Powoli malejący wykres acf wskazuje również na trend.
+
+```{r acf-kategorie-grupa1, results='asis'}
+# ACF trzech kategorii należących do Grupy 1:
+# - Podatki od osób fizycznych
+# - Akcyza
+# - Podatki od spadków i darowizn
+
+p_acf_grupa1 <- acf_trening |>
+  dplyr::filter(
+    poziom == "Kategorie",
+    as.character(grupa) == "Grupa 1"
+  ) |>
+  wykres_acf() +
+  ggplot2::facet_wrap(
+    ggplot2::vars(panel),
+    ncol = 2,
+    labeller = ggplot2::labeller(
+      panel = ggplot2::label_wrap_gen(width = 26)
+    )
+  )
+
+renderuj_rysunki_pracy(
+  wykresy = list(p_acf_grupa1),
+  podpis = "Autokorelacja kategorii bazowych Grupy 1",
+  zrodlo = "Opracowanie własne na podstawie danych U.S. Treasury.",
+  szerokosc = 7,
+  wysokosc = 4.5
+)
+```
+W szeregach wpływów z akcyzy i podatków od osób fizycznych widoczne są lokalne maksima autokorelacji przy opóźnieniach 12, 24 i 36 miesięcy. Ich regularne rozmieszczenie wskazuje na sezonowość roczną. W przypadku podatków od osób fizycznych sygnał ten jest wyraźniejszy, szczególnie przy opóźnieniu 12 miesięcy. Dla wpływów z podatku od spadków i darowizn wartości autokorelacji są przeważnie niewielkie, a przy wielokrotnościach 12 miesięcy brak powtarzalnych maksimów. Wykres ACF tej kategorii nie dostarcza zatem wyraźnych przesłanek wskazujących na sezonowość roczną.
+
+```{r acf-kategorie-grupa2, results='asis'}
+# ACF czterech kategorii należących do Grupy 2:
+# - Ubezpieczenia i emerytury
+# - Podatki od przedsiębiorstw
+# - Cła
+# - Pozostałe dochody
+
+p_acf_grupa2 <- acf_trening |>
+  dplyr::filter(
+    poziom == "Kategorie",
+    as.character(grupa) == "Grupa 2"
+  ) |>
+  wykres_acf() +
+  ggplot2::facet_wrap(
+    ggplot2::vars(panel),
+    ncol = 2,
+    labeller = ggplot2::labeller(
+      panel = ggplot2::label_wrap_gen(width = 26)
+    )
+  )
+
+renderuj_rysunki_pracy(
+  wykresy = list(p_acf_grupa2),
+  podpis = "Autokorelacja kategorii bazowych Grupy 2",
+  zrodlo = "Opracowanie własne na podstawie danych U.S. Treasury.",
+  szerokosc = 7,
+  wysokosc = 4.5
+)
+```
+- **Cła**
+  Wysoka dodatnia autokorelacja przy pierwszych opóźnieniach szybko maleje. Wskazuje to na silną zależność między obserwacjami z sąsiednich miesięcy. Przy opóźnieniach 12, 24 i 36 miesięcy nie widać regularnych maksimów wskazujących na sezonowość roczną.
+- **Podatki od przedsiębiorstw**
+  Wyraźne maksima przy opóźnieniach 12, 24 i 36 miesięcy wskazują na sezonowość roczną. To dominujący wzorzec widoczny na wykresie ACF.
+- **Pozostałe dochody**
+  Dodatnia autokorelacja utrzymuje się przez kilkanaście opóźnień i stopniowo maleje. Taki przebieg jest zgodny z obecnością trendu, a przy wielokrotnościach 12 miesięcy brak wyraźnego, powtarzalnego wzorca sezonowego.
+- **Ubezpieczenia i emerytury**
+  Dodatnia autokorelacja utrzymuje się dla wielu kolejnych opóźnień, co jest zgodne z obecnością trendu. Na tym tle wyróżniają się maksima przy opóźnieniach 12, 24 i 36 miesięcy, które wskazują na sezonowość roczną.
+
+```{r wnioski-acf-dane, include=FALSE}
+# WNIOSKI Z ACF | zliczamy powtarzające się roczne maksima
+# i wyznaczamy szereg z największą średnią krótką autokorelacją.
+
+wzorce_acf <- acf_trening |>
+  group_by(id_wezla, wezel) |>
+  arrange(opoznienie, .by_group = TRUE) |>
+  summarise(
+    szczyty_roczne = sum(
+      roczne & acf > granica & acf > lag(acf, default = -Inf) & acf > lead(acf, default = -Inf),
+      na.rm = TRUE
+    ),
+    srednia_acf_krotka = mean(acf[opoznienie <= 3L]),
+    .groups = "drop"
+  )
+sezonowe <- filter(wzorce_acf, szczyty_roczne >= 2L)
+najwieksza_acf <- wzorce_acf |>
+  filter(is.finite(srednia_acf_krotka)) |>
+  slice_max(srednia_acf_krotka, n = 1L, with_ties = FALSE)
+```
+
+```{r wnioski-acf, results="asis"}
+# PREZENTACJA WNIOSKÓW ACF | gotowe wyniki opisujemy po polsku,
+# bez powtarzania analizy w chunku drukującym.
+
+if (nrow(sezonowe) > 0L) {
+  cat(sprintf(
+    "Co najmniej dwa roczne maksima powyżej orientacyjnej granicy widać w szeregach %s.\n\n",
+    paste0("„", sezonowe$wezel, "”", collapse = ", ")
+  ))
+} else {
+  cat("W pokazanym zakresie żaden szereg nie ma dwóch dodatnich lokalnych maksimów powyżej orientacyjnej granicy przy opóźnieniach rocznych.\n\n")
+}
+
+if (nrow(najwieksza_acf) > 0L) {
+  cat(sprintf(
+    "Najwyższą średnią ACF dla opóźnień od 1 do 3 miesięcy ma szereg „%s” (%s). Ewentualny trend warto rozpatrywać razem z przebiegiem szeregu w czasie.\n",
+    najwieksza_acf$wezel, liczba(najwieksza_acf$srednia_acf_krotka, 2L)
+  ))
+}
+```
+
+## Poziomy a zmiany miesięczne
+
+Pierwsza różnica to wpływy w danym miesiącu pomniejszone o wpływy z
+poprzedniego miesiąca. Dla dochodów ogółem i wybranych kategorii
+porównujemy ACF poziomów z ACF tych zmian. Jeśli po różnicowaniu
+krótkookresowa autokorelacja słabnie, zależność widoczna dla poziomów w
+mniejszym stopniu przenosi się na miesięczne zmiany.
+
+```{r acf-roznic-dane, include=FALSE}
+# DANE PORÓWNAWCZE | liczymy ACF pierwszych różnic
+# i łączymy je z ACF poziomów dla wybranych węzłów.
+
+acf_roznice <- z_panelami(trening) |>
+  filter(id_wezla %in% wezly_omawiane$id_wezla) |>
+  arrange(data) |>
+  group_by(id_wezla) |>
+  group_modify(~ oblicz_acf(diff(.x$mld_usd))) |>
+  ungroup() |>
+  left_join(wezly, by = "id_wezla") |>
+  mutate(seria = "Pierwsza różnica")
+
+acf_porownanie <- bind_rows(
+  acf_trening |> filter(id_wezla %in% wezly_omawiane$id_wezla) |> mutate(seria = "Poziom"),
+  acf_roznice
+) |>
+  arrange(id_wezla, match(seria, c("Poziom", "Pierwsza różnica"))) |>
+  mutate(panel_porownania = paste(wezel, seria, sep = " | "),
+         panel_porownania = factor(panel_porownania, levels = unique(panel_porownania)))
+```
+
+```{r acf-roznic, fig.height=wyglad$wysokosc_porownania_acf, fig.cap="Porównanie autokorelacji poziomów i pierwszych różnic"}
+# WYKRES ACF POZIOMÓW I RÓŻNIC | wspólny styl i dwa panele
+# na każdy szereg — bez przeliczania wejściowych danych.
+
+wykres_acf(acf_porownanie) +
+  facet_wrap(vars(panel_porownania), ncol = 2L,
+             labeller = labeller(panel_porownania = label_wrap_gen(width = wyglad$wykres$zawijanie_etykiet)))
+```
+
+```{r komentarz-roznic-dane, include=FALSE}
+# WNIOSKI Z RÓŻNICOWANIA | wyciągamy ACF przy opóźnieniu 1
+# dla poziomów i pierwszych różnic i łączymy te wartości w jednym wierszu.
+
+acf_najkrotsza <- acf_porownanie |>
+  filter(opoznienie == 1L, is.finite(acf)) |>
+  select(id_wezla, wezel, seria, acf) |>
+  tidyr::pivot_wider(names_from = seria, values_from = acf)
+```
+
+```{r komentarz-roznic, results="asis"}
+# INTERPRETACJA | opisujemy pary ACF i wskazujemy,
+# czy bezwzględna siła autokorelacji wzrosła czy zmalała.
+
+if (all(c("Poziom", "Pierwsza różnica") %in% names(acf_najkrotsza))) {
+  for (i in seq_len(nrow(acf_najkrotsza))) {
+    w <- acf_najkrotsza[i, ]
+    if (all(is.finite(c(w$Poziom, w$`Pierwsza różnica`)))) {
+      kierunek <- if (abs(w$`Pierwsza różnica`) < abs(w$Poziom)) {
+        " Po różnicowaniu siła zależności przy tym opóźnieniu maleje."
+      } else if (abs(w$`Pierwsza różnica`) > abs(w$Poziom)) {
+        " Po różnicowaniu siła zależności przy tym opóźnieniu rośnie."
+      } else {
+        ""
+      }
+      cat(sprintf(
+        "Dla szeregu „%s” ACF przy opóźnieniu jednego miesiąca wynosi %s dla poziomów i %s dla pierwszych różnic.%s\n\n",
+        w$wezel, liczba(w$Poziom, 2L), liczba(w$`Pierwsza różnica`, 2L), kierunek
+      ))
+    }
+  }
+}
+```
+
+# Prognozy bazowe
+
+Każdą metodę dopasowujemy osobno do każdego węzła hierarchii.
+
+-   **Naive** powtarza ostatnią zaobserwowaną wartość.
+-   **SNaive** powtarza wartość z odpowiadającego miesiąca ostatniego
+    dostępnego cyklu rocznego.
+-   **ETS** dobiera składowe wygładzania wykładniczego na podstawie
+    AICc.
+-   **ARIMA** dobiera rzędy modelu z uwzględnieniem składowej sezonowej,
+    wykorzystując AICc do porównania modeli kandydujących.
+
+[Dokumentacja ETS](https://fable.tidyverts.org/reference/ETS.html) oraz
+[dokumentacja ARIMA](https://fable.tidyverts.org/reference/ARIMA.html).
+
+```{r modele-i-prognozy, include=FALSE}
+# MODELE I PROGNOZY | dopasowujemy Naive, SNaive, ETS i ARIMA
+# oddzielnie do każdego węzła w danych treningowych.
+# `forecast` liczy prognozy na daty walidacyjne; walidacja sprawdza
+# kompletność i skończoność otrzymanych prognoz punktowych.
+# Modele i prognozy powstają tu, a będą narysowane później.
+
+modele_bazowe <- trening |>
+  model(
+    Naive = NAIVE(mld_usd),
+    SNaive = SNAIVE(mld_usd ~ lag(okres_sezonowy)),
+    ETS = ETS(mld_usd),
+    ARIMA = ARIMA(mld_usd, approximation = FALSE),
+    .safely = FALSE
+  )
+
+# Prognoza otrzymuje klucze i daty walidacji. Kwoty są używane na wykresie.
+prognozy_bazowe <- forecast(modele_bazowe, new_data = select(walidacja, -mld_usd))
+stopifnot(
+  "Prognozy muszą pokrywać wszystkie miesiące i węzły dla każdego modelu." =
+    nrow(prognozy_bazowe) == nrow(walidacja) * length(mable_vars(modele_bazowe)) &&
+    all(is.finite(prognozy_bazowe$.mean))
+)
+```
+
+Każda ścieżka prognozy powstaje na koniec treningu. Ciemna linia
+pokazuje rzeczywiste wpływy. Zacienienie i pionowa kreska wskazują okres
+walidacji. Panele mają osobne skale pionowe.
+
+```{r prognozy-wykres-dane, include=FALSE}
+# DANE WYKRESU PROGNOZ | ograniczamy historię do ostatnich
+# `wyglad$historia_prognoz` miesięcy treningowych i walidacji,
+# dołączamy etykiety węzłów do obserwacji i prognoz.
+
+od_kiedy <- max(daty_trening) - (wyglad$historia_prognoz - 1L)
+obserwacje <- dane_ts |> filter(data >= od_kiedy) |> z_panelami()
+prognozy <- z_panelami(prognozy_bazowe)
+```
+
+```{r wykresy-prognoz, fig.cap="Prognozy bazowe i obserwacje według węzłów hierarchii", fig.show='asis'}
+# WYKRESY PROGNOZ | obserwacje rzeczywiste, prognozy czterech modeli
+# i wydzielony okres walidacyjny są rysowane w osobnych panelach.
+# Różnice w kolorze i typie linii identyfikują modele.
+
+for (ids in zestawy_paneli) {
+  wybrane_prognozy <- filter(prognozy, id_wezla %in% ids)
+  p <- ggplot() +
+    tlo_walidacji +
+    granica_walidacji +
+    geom_line(data = filter(obserwacje, id_wezla %in% ids),
+              aes(miesiac, mld_usd), colour = wyglad$kolory$obserwacje,
+              linewidth = wyglad$wykres$grubosc_linii)
+  if (h_walidacji > 1L) {
+    p <- p + geom_line(data = wybrane_prognozy,
+                      aes(miesiac, .mean, colour = .model, linetype = .model),
+                      linewidth = wyglad$wykres$grubosc_linii)
+  }
+  print(
+    p +
+      geom_point(data = wybrane_prognozy, aes(miesiac, .mean, colour = .model),
+                 size = wyglad$wykres$punkty_prognoz) +
+      panele_szeregow("free_y") +
+      scale_colour_manual(values = wyglad$kolory$modele, breaks = names(wyglad$kolory$modele)) +
+      scale_linetype_manual(values = wyglad$linie_modeli, breaks = names(wyglad$kolory$modele)) +
+      scale_x_date(date_labels = "%Y-%m", breaks = scales::breaks_pretty(n = 4)) +
+      labs(x = NULL, y = "mld USD", colour = NULL, linetype = NULL) +
+      motyw_szeregow
+  )
+}
+```
+
+## Interpretacja pierwszych prognoz
+
+Dla wybranych szeregów porównujemy termin najwyższych wpływów oraz
+sprawdzamy, czy obserwacja w tym miesiącu mieści się pomiędzy najniższą
+i najwyższą prognozą punktową.
+
+```{r komentarz-prognoz-dane, include=FALSE}
+# PORÓWNANIE SZCZYTÓW | identyfikujemy największe wartości obserwacji
+# w walidacji i miesiące najwyższej prognozy w każdym modelu.
+
+obserwowane_szczyty <- z_panelami(walidacja) |>
+  filter(id_wezla %in% wezly_omawiane$id_wezla) |>
+  group_by(id_wezla) |>
+  filter(mld_usd == max(mld_usd)) |>
+  select(id_wezla, data, wezel, mld_usd) |>
+  ungroup()
+
+szczyty_prognoz <- prognozy |>
+  filter(id_wezla %in% wezly_omawiane$id_wezla) |>
+  group_by(id_wezla, .model) |>
+  filter(.mean == max(.mean), n_distinct(.mean) > 1L) |>
+  ungroup()
+```
+
+```{r komentarz-prognoz, results="asis"}
+# INTERPRETACJA PROGNOZ | dla wybranych węzłów opisujemy terminy
+# szczytów i położenie obserwacji względem zakresu prognoz punktowych.
+
+for (id in wezly_omawiane$id_wezla) {
+  szczyt <- filter(obserwowane_szczyty, id_wezla == id)
+  zgodne <- szczyty_prognoz |>
+    semi_join(szczyt, by = c("id_wezla", "data")) |>
+    pull(.model) |>
+    unique()
+  termin <- paste(miesiac(szczyt$data), collapse = ", ")
+  wspolny_termin <- if (length(zgodne) > 0L) {
+    paste("Szczyt w tym samym miesiącu pokazują modele", paste(zgodne, collapse = ", "))
+  } else {
+    "Żadna z prognoz o zmiennym przebiegu nie wskazuje szczytu w tym samym miesiącu"
+  }
+  cat(sprintf("**%s.** Najwyższe wpływy w walidacji odnotowano w %s (%s mld USD). ",
+              first(szczyt$wezel), termin, liczba(first(szczyt$mld_usd))))
+  if (h_walidacji > 1L && nrow(szczyt) < h_walidacji) {
+    cat(wspolny_termin, ". ", sep = "")
+  }
+  if (nrow(szczyt) == 1L) {
+    w_szczycie <- semi_join(prognozy, szczyt, by = c("id_wezla", "data"))
+    minimum <- min(w_szczycie$.mean)
+    maksimum <- max(w_szczycie$.mean)
+    polozenie <- case_when(
+      szczyt$mld_usd > maksimum ~ "Obserwacja przekracza wszystkie prognozy punktowe.",
+      szczyt$mld_usd < minimum ~ "Obserwacja jest poniżej wszystkich prognoz punktowych.",
+      TRUE ~ "Obserwacja mieści się w tym zakresie."
+    )
+    cat(sprintf("Prognozy na ten miesiąc wynoszą od %s do %s mld USD. %s",
+                liczba(minimum), liczba(maksimum), polozenie))
+  }
+  cat("\n\n")
+}
+```
+
+## Ocena jakości prognoz bazowych
+
+Ocenę przeprowadzono na okresie walidacji (`r zakres(daty_walidacji)`).
+Dla każdego węzła wszystkie modele porównano na tych samych miesiącach.
+MAE to średnia bezwzględna wartość błędu, a RMSE to pierwiastek ze
+średniej kwadratów błędów. Obie miary wyrażono w mld USD.
+
+MASE i RMSSE to odpowiednio MAE i RMSE podzielone przez analogiczną
+miarę błędu sezonowej metody naiwnej w próbie treningowej. Błąd
+odniesienia to różnica między obserwacją a wartością sprzed
+`r okres_sezonowy` miesięcy. Skalę oblicza się oddzielnie dla każdego
+węzła i stosuje wspólnie dla wszystkich jego modeli. Przy zerowej skali
+MASE i RMSSE są nieokreślone. [Definicje miar błędu
+prognoz](https://otexts.com/fpp3/toolbox.html#evaluating-point-forecast-accuracy).
+
+```{r miary-prognoz-dane, include=FALSE}
+# Łączymy prognozy punktowe z obserwacjami po węźle i miesiącu.
+modele_oceniane <- mable_vars(modele_bazowe)
+klucz_walidacji <- c("id_wezla", "data")
+klucz_prognoz <- c(klucz_walidacji, ".model")
+
+obserwacje_walidacyjne <- z_panelami(walidacja) |>
+  select(all_of(klucz_walidacji), mld_usd)
+prognozy_do_oceny <- z_panelami(prognozy_bazowe) |>
+  select(all_of(klucz_prognoz), .mean)
+
+oczekiwane_obserwacje <- tidyr::expand_grid(
+  id_wezla = wezly$id_wezla,
+  data = daty_walidacji
+)
+oczekiwane_prognozy <- tidyr::expand_grid(
+  id_wezla = wezly$id_wezla,
+  data = daty_walidacji,
+  .model = modele_oceniane
+)
+stopifnot(
+  "Walidacja musi zawierać jedną skończoną obserwację na węzeł i miesiąc." =
+    nrow(obserwacje_walidacyjne) == nrow(oczekiwane_obserwacje) &&
+    nrow(anti_join(oczekiwane_obserwacje, obserwacje_walidacyjne,
+                   by = klucz_walidacji)) == 0L &&
+    all(is.finite(obserwacje_walidacyjne$mld_usd)),
+  "Każdy model musi mieć jedną skończoną prognozę na węzeł i miesiąc walidacji." =
+    nrow(prognozy_do_oceny) == nrow(oczekiwane_prognozy) &&
+    nrow(anti_join(oczekiwane_prognozy, prognozy_do_oceny,
+                   by = klucz_prognoz)) == 0L &&
+    all(is.finite(prognozy_do_oceny$.mean))
+)
+
+# Skale SNaive pochodzą wyłącznie z próby treningowej.
+skale_bledow_prognoz <- z_panelami(trening) |>
+  arrange(data) |>
+  group_by(id_wezla) |>
+  reframe(roznica_sezonowa = diff(mld_usd, lag = okres_sezonowy)) |>
+  group_by(id_wezla) |>
+  summarise(
+    skala_mae = mean(abs(roznica_sezonowa)),
+    skala_rmse = sqrt(mean(roznica_sezonowa^2)),
+    .groups = "drop"
+  )
+
+miary_prognoz <- prognozy_do_oceny |>
+  left_join(obserwacje_walidacyjne, by = klucz_walidacji) |>
+  mutate(blad = mld_usd - .mean) |>
+  group_by(id_wezla, .model) |>
+  summarise(
+    MAE = mean(abs(blad)),
+    RMSE = sqrt(mean(blad^2)),
+    .groups = "drop"
+  ) |>
+  left_join(skale_bledow_prognoz, by = "id_wezla") |>
+  mutate(
+    MASE = MAE / na_if(skala_mae, 0),
+    RMSSE = RMSE / na_if(skala_rmse, 0)
+  ) |>
+  select(id_wezla, .model, MAE, RMSE, MASE, RMSSE)
+
+# Przygotowujemy po jednej zwartej tabeli dla każdej miary.
+kolejnosc_wezlow_miar <- wezly |>
+  arrange(poziom, as.character(grupa), id_wezla) |>
+  select(id_wezla, Szereg = wezel)
+
+miary_do_tabel <- c("MAE", "RMSE", "MASE", "RMSSE")
+tabele_miar_prognoz <- setNames(lapply(miary_do_tabel, function(miara) {
+  miary_prognoz |>
+    select(id_wezla, .model, all_of(miara)) |>
+    tidyr::pivot_wider(names_from = .model, values_from = all_of(miara)) |>
+    right_join(kolejnosc_wezlow_miar, by = "id_wezla") |>
+    arrange(match(id_wezla, kolejnosc_wezlow_miar$id_wezla)) |>
+    select(Szereg, all_of(modele_oceniane))
+}), miary_do_tabel)
+```
+
+Dla każdego szeregu pogrubiono najniższą wartość danej miary. Jeżeli
+kilka modeli osiągnęło to samo minimum, wyróżniono wszystkie remisujące
+wyniki.
+
+```{r miary-prognoz-mae}
+tabela_praca(
+  dane = tabele_miar_prognoz$MAE,
+  podpis = "Średni bezwzględny błąd prognoz bazowych (MAE, mld USD)",
+  zrodlo = "Opracowanie własne na podstawie danych U.S. Treasury.",
+  wyroznienie = "wiersze",
+  kryterium = "min",
+  kolumny_oceny = modele_oceniane
+)
+```
+
+```{r miary-prognoz-rmse}
+tabela_praca(
+  dane = tabele_miar_prognoz$RMSE,
+  podpis = "Pierwiastek ze średniego kwadratu błędu prognoz bazowych (RMSE, mld USD)",
+  zrodlo = "Opracowanie własne na podstawie danych U.S. Treasury.",
+  wyroznienie = "wiersze",
+  kryterium = "min",
+  kolumny_oceny = modele_oceniane
+)
+```
+
+```{r miary-prognoz-mase}
+tabela_praca(
+  dane = tabele_miar_prognoz$MASE,
+  podpis = "Średni bezwzględny skalowany błąd prognoz bazowych (MASE)",
+  zrodlo = "Opracowanie własne na podstawie danych U.S. Treasury.",
+  wyroznienie = "wiersze",
+  kryterium = "min",
+  kolumny_oceny = modele_oceniane
+)
+```
+
+```{r miary-prognoz-rmsse}
+tabela_praca(
+  dane = tabele_miar_prognoz$RMSSE,
+  podpis = "Pierwiastek ze średniego kwadratu skalowanego błędu prognoz bazowych (RMSSE)",
+  zrodlo = "Opracowanie własne na podstawie danych U.S. Treasury.",
+  wyroznienie = "wiersze",
+  kryterium = "min",
+  kolumny_oceny = modele_oceniane
+)
+```
+
+Wyniki walidacji uzasadniają dobór modeli bazowych osobno dla
+poszczególnych węzłów hierarchii. Model SNaive uzyskał najniższe
+wartości wszystkich analizowanych miar dla dochodów ogółem, Grupy 1,
+akcyzy, podatków od osób fizycznych oraz pozostałych dochodów. Model ETS
+osiągnął najniższe błędy dla ceł, podatków od przedsiębiorstw oraz
+ubezpieczeń i emerytur, a model ARIMA dla Grupy 2. W przypadku Grupy 2
+przewaga ARIMA nad SNaive była niewielka. Przykładowo wartości RMSE
+wyniosły odpowiednio 31,18 i 31,44 mld USD.
+
+Dla podatków od spadków i darowizn wybór zależy od przyjętej miary.
+Model SNaive osiągnął najniższy MAE (0,86 mld USD), a ETS najniższy RMSE
+(1,11 mld USD). Jeżeli jako główne kryterium doboru przyjęto MAE, do
+dalszej analizy można wybrać SNaive. Przy większej wadze dużych błędów,
+mierzonej przez RMSE, wyniki wskazują na ETS.
+
+Szczególnie trudnym szeregiem w badanym okresie okazały się cła. Nawet
+najlepiej oceniony model ETS uzyskał MASE równe 7,80 i RMSSE równe 4,74.
+Oznacza to, że błędy na walidacji były wyraźnie większe od sezonowej
+skali odniesienia wyznaczonej dla tego szeregu na treningu.
+
+```{=html}
+<!--
+Do dalszych etapów:
+- dane_ts, trening i walidacja zachowują klucze hierarchii fabletools.
+- modele_bazowe i prognozy_bazowe zawierają dopasowane modele i rozkłady prognoz.
+- acf_trening zawiera wartości ACF według klucza węzła i opóźnienia.
+- W parametrach YAML można zmienić plik_danych, zrodlo i h_walidacji.
+  Nowy CSV powinien zawierać regularne miesięczne dane w kolumnach
+  data, kod, usd i kategoria. Kolumna grupa jest tworzona w R na podstawie
+  mapa_grup (CSV nie musi jej zawierać). Jeśli plik zawiera sumę, określa ją
+  etykieta_sumy. Zmienna zrodlo pozwala zaktualizować opis pochodzenia.
+-->
+```
+
+
+# Uzgadnianie prognoz: Bottom-Up, Top-Down i Middle-Out
+
+Celem eksperymentu jest sprawdzenie, czy wymuszenie zgodności sum prognoz
+poprawia ich dokładność. Porównujemy prognozy bazowe, wyznaczane niezależnie
+dla każdego szeregu (BASE), z metodami Bottom-Up (BU), Top-Down (TD)
+i Middle-Out (MO).
+
+Dla TD i MO rozpatrujemy dwa sposoby wyznaczania udziałów służących do
+podziału prognozy rodzica między jego dzieci. Wariant H wykorzystuje
+udziały historyczne, obliczone jako stosunek sumy wartości dziecka do sumy
+wartości rodzica w okresie treningowym. Udziały te pozostają stałe w całym
+horyzoncie prognozy. Wariant P wykorzystuje udziały wyznaczane z prognoz
+bazowych dzieci, oddzielnie dla każdego prognozowanego miesiąca.
+
+Porównanie obejmuje modele Naive, SNaive, ETS i ARIMA na istniejącym
+podziale: trening `r zakres(daty_trening)`, walidacja `r zakres(daty_walidacji)`.
+Każdy model oceniono w sześciu konfiguracjach: BASE, BU, TD-H, TD-P, MO-H
+i MO-P, bez wcześniejszego wybierania modelu dla poszczególnych węzłów.
+
+Podstawę metodologiczną stanowi
+[Forecasting: Principles and Practice, rozdz. 11](https://otexts.com/fpp3/hierarchical-forecasting.html).
+Oznaczenie $\hat y$ odnosi się do prognozy bazowej, a $\tilde y$ do prognozy
+uzgodnionej. Indeks $h$ oznacza liczbę miesięcy od końca treningu: $h=1$
+odpowiada pierwszemu prognozowanemu miesiącowi, a $h=12$ — dwunastemu.
+
+```{r uzg-konfiguracja, include=FALSE}
+uzg_cfg <- list(
+  metody = c("BASE", "BU", "TD-H", "TD-P", "MO-H", "MO-P"),
+  styl = wyglad$wykres, tolerancja = 1e-8,
+  metryki_prezentowane = c("MASE", "RMSSE")
+)
+```
+
+```{r uzg-funkcje, include=FALSE}
+uzg_wektor <- function(bazowe, historyczne, meta, metoda) {
+  stopifnot(length(bazowe) == nrow(meta), length(historyczne) == nrow(meta),
+            all(is.finite(bazowe)), all(is.finite(historyczne)),
+            metoda %in% c("BU", "TD-H", "TD-P", "MO-H", "MO-P"))
+  root <- which(meta$poziom == "Ogółem")
+  groups <- which(meta$poziom == "Grupy")
+  stopifnot(length(root) == 1L, length(groups) > 0L)
+  out <- bazowe
+  udzial <- function(x) {
+    if (any(x < 0) || sum(x) <= .Machine$double.eps * max(1, sum(abs(x))))
+      stop("Nie można wyznaczyć nieujemnych udziałów: ujemna wartość lub zerowa suma.")
+    x / sum(x)
+  }
+  if (startsWith(metoda, "TD")) {
+    weights <- if (metoda == "TD-H") historyczne else bazowe
+    out[groups] <- bazowe[root] * udzial(weights[groups])
+  }
+  for (g in groups) {
+    kids <- which(meta$poziom == "Kategorie" & meta$grupa == meta$grupa[g])
+    stopifnot(length(kids) > 0L)
+    if (metoda == "BU") out[g] <- sum(bazowe[kids]) else {
+      weights <- if (endsWith(metoda, "H")) historyczne else bazowe
+      out[kids] <- out[g] * udzial(weights[kids])
+    }
+  }
+  out[root] <- sum(out[groups])
+  out
+}
+uzg_niespojnosc <- function(x, meta) {
+  groups <- which(meta$poziom == "Grupy")
+  errors <- x[meta$poziom == "Ogółem"] - sum(x[groups])
+  for (g in groups) errors <- c(errors, x[g] - sum(x[
+    meta$poziom == "Kategorie" & meta$grupa == meta$grupa[g]]))
+  max(abs(errors))
+}
+```
+
+```{r uzg-obliczenia, include=FALSE}
+uzg_meta <- wezly |> as_tibble() |>
+  transmute(id_wezla, poziom = as.character(poziom),
+            grupa = as.character(grupa), wezel) |>
+  arrange(match(poziom, c("Ogółem", "Grupy", "Kategorie")), grupa, id_wezla)
+uzg_train <- z_panelami(trening) |> as_tibble() |>
+  select(id_wezla, data, mld_usd)
+uzg_base <- z_panelami(prognozy_bazowe) |> as_tibble() |>
+  select(id_wezla, data, .model, .mean)
+uzg_actual <- z_panelami(walidacja) |> as_tibble() |>
+  select(id_wezla, data, mld_usd)
+uzg_expected <- tidyr::expand_grid(id_wezla = uzg_meta$id_wezla,
+  data = daty_walidacji, .model = mable_vars(modele_bazowe))
+stopifnot(!anyDuplicated(uzg_base[c("id_wezla", "data", ".model")]),
+  !anyDuplicated(uzg_actual[c("id_wezla", "data")]),
+  nrow(uzg_base) == nrow(uzg_expected),
+  nrow(anti_join(uzg_expected, uzg_base, by = c("id_wezla", "data", ".model"))) == 0L,
+  all(is.finite(uzg_base$.mean)), all(is.finite(uzg_actual$mld_usd)))
+uzg_hist <- uzg_train |> group_by(id_wezla) |>
+  summarise(suma = sum(mld_usd), .groups = "drop")
+uzg_hist <- uzg_hist$suma[match(uzg_meta$id_wezla, uzg_hist$id_wezla)]
+stopifnot(uzg_niespojnosc(uzg_hist, uzg_meta) <=
+            uzg_cfg$tolerancja * max(1, max(abs(uzg_hist))))
+
+uzg_parts <- list()
+uzg_i <- 0L
+for (uzg_model in mable_vars(modele_bazowe)) {
+  for (uzg_method in uzg_cfg$metody) {
+    for (uzg_t in seq_along(daty_walidacji)) {
+      uzg_date <- daty_walidacji[uzg_t]
+      uzg_b <- uzg_base |> filter(.model == uzg_model, data == uzg_date)
+      uzg_y <- uzg_b$.mean[match(uzg_meta$id_wezla, uzg_b$id_wezla)]
+      uzg_out <- if (uzg_method == "BASE") uzg_y else
+        uzg_wektor(uzg_y, uzg_hist, uzg_meta, uzg_method)
+      uzg_i <- uzg_i + 1L
+      uzg_parts[[uzg_i]] <- tibble(id_wezla = uzg_meta$id_wezla,
+        data = uzg_date, .model = uzg_model, metoda = uzg_method,
+        h = uzg_t, prognoza = uzg_out)
+    }
+  }
+}
+uzg_prognozy <- bind_rows(uzg_parts)
+stopifnot(nrow(uzg_prognozy) == nrow(uzg_base) * length(uzg_cfg$metody),
+          all(is.finite(uzg_prognozy$prognoza)))
+uzg_kontrola <- uzg_prognozy |> group_by(.model, metoda, data) |>
+  summarise(rozbieznosc = uzg_niespojnosc(
+    prognoza[match(uzg_meta$id_wezla, id_wezla)], uzg_meta),
+    skala = max(1, max(abs(prognoza))), .groups = "drop") |>
+  mutate(spojne = rozbieznosc <= uzg_cfg$tolerancja * skala)
+stopifnot(all(uzg_kontrola$spojne[uzg_kontrola$metoda != "BASE"]))
+
+uzg_skale <- uzg_train |> arrange(data) |> group_by(id_wezla) |>
+  summarise(s_mae = mean(abs(diff(mld_usd, lag = okres_sezonowy))),
+    s_rmse = sqrt(mean(diff(mld_usd, lag = okres_sezonowy)^2)), .groups = "drop")
+uzg_bledy <- uzg_prognozy |> left_join(uzg_actual, by = c("id_wezla", "data")) |>
+  mutate(blad = mld_usd - prognoza)
+stopifnot(all(is.finite(uzg_bledy$blad)))
+uzg_miary <- uzg_bledy |> group_by(id_wezla, .model, metoda) |>
+  summarise(MAE = mean(abs(blad)), RMSE = sqrt(mean(blad^2)), .groups = "drop") |>
+  left_join(uzg_skale, by = "id_wezla") |>
+  mutate(MASE = MAE / na_if(s_mae, 0), RMSSE = RMSE / na_if(s_rmse, 0)) |>
+  left_join(uzg_meta, by = "id_wezla")
+uzg_long <- uzg_miary |> tidyr::pivot_longer(c(MAE, RMSE, MASE, RMSSE),
+  names_to = "miara", values_to = "wartosc")
+uzg_reference <- uzg_long |> filter(metoda == "BASE") |>
+  select(id_wezla, .model, miara, baza = wartosc)
+uzg_long <- uzg_long |> left_join(uzg_reference, by = c("id_wezla", ".model", "miara")) |>
+  mutate(zmiana_proc = 100 * (wartosc - baza) / na_if(baza, 0))
+uzg_poziomy <- uzg_long |> group_by(.model, metoda, poziom, miara) |>
+  summarise(wartosc = mean(wartosc), liczba_wezlow = n(), .groups = "drop")
+uzg_ranking <- uzg_poziomy |> filter(miara %in% uzg_cfg$metryki_prezentowane) |>
+  group_by(.model, metoda, miara) |>
+  summarise(wartosc = mean(wartosc), .groups = "drop")
+```
+
+```{r uzg-prezentacja-funkcje, include=FALSE}
+uzg_cfg$kolory_modeli <- setNames(paleta[c(2,3,1,4)], c("Naive","SNaive","ETS","ARIMA"))
+uzg_cfg$linie_modeli <- wyglad$linie_modeli
+uzg_cfg$wybrane_kategorie <- 2L
+uzg_tabela_zmian <- function(metody) {
+  stopifnot(all(metody %in% uzg_cfg$metody))
+  uzg_ranking |> filter(metoda %in% metody) |>
+    semi_join(filter(uzg_roznice, max_zmiana > uzg_cfg$tolerancja), by=c(".model","metoda")) |>
+    left_join(uzg_ranking |> filter(metoda=="BASE") |>
+      select(.model, miara, baza=wartosc), by=c(".model","miara")) |>
+    mutate(zmiana=100*(wartosc-baza)/na_if(baza,0)) |>
+    select(Model=.model, Metoda=metoda, miara, wartosc, zmiana) |>
+    tidyr::pivot_wider(names_from=miara, values_from=c(wartosc,zmiana)) |>
+    select(Model, Metoda, MASE=wartosc_MASE, RMSSE=wartosc_RMSSE,
+      `MASE: zmiana (%)`=zmiana_MASE, `RMSSE: zmiana (%)`=zmiana_RMSSE)
+}
+uzg_wykres <- function(metody, ids) {
+  stopifnot(length(ids)>0L, all(ids %in% uzg_meta$id_wezla), all(metody %in% uzg_cfg$metody))
+  dane <- uzg_prognozy |> filter(metoda %in% metody, id_wezla %in% ids) |>
+    left_join(uzg_meta, by="id_wezla") |>
+    mutate(miesiac=as.Date(data), wezel=factor(wezel, levels=uzg_meta$wezel),
+      metoda=factor(metoda,levels=metody))
+  obs <- uzg_actual |> filter(id_wezla %in% ids) |> left_join(uzg_meta,by="id_wezla") |>
+    mutate(miesiac=as.Date(data),wezel=factor(wezel,levels=uzg_meta$wezel))
+  ggplot(dane,aes(miesiac,prognoza,colour=.model,linetype=.model)) +
+    geom_line(linewidth=uzg_cfg$styl$grubosc_linii) +
+    geom_point(data=obs,aes(miesiac,mld_usd),inherit.aes=FALSE,
+      colour=paleta_finansowa[["Rzeczywiste"]],size=uzg_cfg$styl$punkty_prognoz+0.3) +
+    facet_grid(wezel~metoda,scales="free_y") +
+    scale_colour_manual(values=uzg_cfg$kolory_modeli) +
+    scale_linetype_manual(values=uzg_cfg$linie_modeli) +
+    scale_x_date(date_breaks="3 months",date_labels="%Y-%m") +
+    scale_y_continuous(labels=scales::label_number(decimal.mark=",")) +
+    labs(x=NULL,y="mld USD",colour="Model bazowy",linetype="Model bazowy") +
+    motyw_szeregow + theme(axis.text.x=element_text(angle=45,hjust=1,size=8),
+      strip.text.y=element_text(size=8),legend.position=uzg_cfg$styl$pozycja_legendy)
+}
+uzg_komentarz <- function(metody) {
+  d <- uzg_long |> filter(metoda %in% metody, miara=="MASE",is.finite(zmiana_proc))
+  a <- d |> arrange(zmiana_proc) |> slice(1)
+  b <- d |> arrange(desc(zmiana_proc)) |> slice(1)
+  paste0("Największy spadek MASE pojedynczego szeregu odnotowano dla: ",
+    a$wezel," (",a$.model,", ",a$metoda,", ",liczba(a$zmiana_proc,1),"%). ",
+    "Największe pogorszenie: ",b$wezel," (",b$.model,", ",b$metoda,", +",liczba(b$zmiana_proc,1),
+    "%).\n\n")
+}
+
+uzg_roznice <- uzg_prognozy |> left_join(uzg_base,by=c("id_wezla","data",".model")) |>
+  group_by(.model,metoda) |> summarise(max_zmiana=max(abs(prognoza-.mean)),.groups="drop")
+uzg_wybor <- function(metody) {
+  uzg_long |> filter(metoda %in% metody,miara=="MASE",poziom=="Kategorie") |>
+    group_by(id_wezla) |> summarise(zmiana=max(abs(zmiana_proc)),.groups="drop") |>
+    arrange(desc(zmiana),id_wezla) |> slice_head(n=uzg_cfg$wybrane_kategorie) |> pull(id_wezla)
+}
+```
+
+## Spójność i ocena prognoz
+
+Spójność oznacza zgodność prognozy rodzica z sumą prognoz jego dzieci.
+Niezależne prognozy ARIMA i ETS nie spełniały tego warunku w żadnym miesiącu
+walidacji. Modele dopasowano osobno do każdego szeregu, bez narzucania
+ograniczeń sumowania. Ich parametry i wybrane postacie mogły się różnić
+między węzłami, dlatego prognoza agregatu nie musiała odpowiadać sumie
+prognoz jego składników. Nie jest to błąd obliczeń, lecz możliwy skutek
+niezależnego prognozowania.
+
+Maksymalna rozbieżność wyniosła odpowiednio
+`r liczba(max(uzg_kontrola$rozbieznosc[uzg_kontrola$.model == "ARIMA" & uzg_kontrola$metoda == "BASE"]), 2)`
+i `r liczba(max(uzg_kontrola$rozbieznosc[uzg_kontrola$.model == "ETS" & uzg_kontrola$metoda == "BASE"]), 2)`
+mld USD. Jest to największa bezwzględna różnica między prognozą rodzica
+a sumą prognoz jego dzieci, wyznaczona po wszystkich relacjach hierarchii
+i miesiącach walidacji. Nie jest to błąd względem rzeczywistych wpływów.
+
+Wszystkie prognozy BU, TD i MO spełniały warunki spójności w całym horyzoncie.
+Sumowanie w BU oraz podział według udziałów sumujących się do jedności
+w TD i MO zapewniają tę własność konstrukcyjnie.
+
+Prognozy bazowe Naive i SNaive również były spójne. Naive kopiuje ostatnią
+obserwację treningową, a SNaive — obserwację z odpowiedniego miesiąca
+poprzedniego roku. Przy wspólnych datach we wszystkich węzłach kopiowane
+wartości zachowują relacje sumowania. Z tego powodu BU nie zmienia tych
+prognoz. Warianty TD-P i MO-P również je odtwarzają: podział spójnej prognozy
+rodzica według udziałów jego prognozowanych dzieci zwraca wyjściowe prognozy
+dzieci. Wariant H może zmienić wynik, ponieważ narzuca przeciętną strukturę
+historyczną zamiast udziałów właściwych dla danego prognozowanego miesiąca.
+
+Dokładność oceniono za pomocą MASE i RMSSE; niższe wartości oznaczają
+mniejsze błędy. RMSSE silniej uwzględnia duże pomyłki. Mianowniki obu miar
+obliczono na treningu na podstawie różnic między obserwacjami oddalonymi
+o 12 miesięcy. Jest to sezonowa skala odniesienia odpowiadająca zasadzie
+prognozowania SNaive. Dzięki skalowaniu można porównywać błędy szeregów
+o różnych wielkościach.
+
+Wartość MASE lub RMSSE poniżej 1 oznacza błąd mniejszy od odpowiedniej skali
+treningowej. Aby stwierdzić przewagę nad SNaive na walidacji, należy
+bezpośrednio porównać wyniki obu metod na tych samych miesiącach.
+
+W tabelach najpierw uśredniono miary po węzłach każdego poziomu, a następnie
+po trzech poziomach z równymi wagami. Wynik obejmuje całą hierarchię, także
+poziomy zachowane przez daną metodę. Procentową zmianę błędu obliczono jako:
+
+\[
+\Delta M=100\left(\frac{M_{\mathrm{uzg}}}{M_{\mathrm{BASE}}}-1\right),
+\]
+
+gdzie $M_{\mathrm{uzg}}$ oznacza zagregowaną wartość MASE lub RMSSE po
+uzgodnieniu, a $M_{\mathrm{BASE}}$ — tę samą miarę dla prognoz bazowych
+tego samego modelu. Wartość ujemna oznacza poprawę, dodatnia pogorszenie,
+a zero brak zmiany.
+
+## Bottom-Up: od kategorii do ogółem
+
+BU wykorzystuje siedem prognoz kategorii i sumuje je w górę drzewa:
+$\tilde y_{g,h}=\sum_{i\in g}\hat y_{i,h}$,
+$\tilde y_{og,h}=\sum_g\tilde y_{g,h}$.
+Zachowuje szczegółowe prognozy, ale przenosi ich błędy do agregatów.
+Nie wykorzystuje bazowej prognozy ogółem ani grup jako ograniczenia sumy.
+
+```{r uzg-bu-tabela}
+tabela_praca(uzg_tabela_zmian("BU"),podpis="BU: konfiguracje zmieniające prognozy BASE",
+  miejsca_dz=3,zrodlo="Opracowanie własne. Zmiany procentowe dotyczą średnich miar całej hierarchii.")
+```
+
+Naive i SNaive pominięto w tabeli, bo BU nie zmienia ich prognoz.
+Na wykresie pozostają jako punkty odniesienia. Siedem kategorii pominięto
+na wykresie: BU zachowuje je z definicji, a ich przebiegi pokazano w sekcji bazowej.
+
+```{r uzg-bu-wniosek, results='asis'}
+cat(uzg_komentarz("BU"))
+```
+
+```{r uzg-bu-wykres, results='asis'}
+renderuj_rysunki_pracy(list(uzg_wykres("BU",uzg_meta$id_wezla[uzg_meta$poziom!="Kategorie"])),
+  podpis="BU: prognozy ogółem i grup według modeli bazowych",
+  zrodlo="Opracowanie własne. Punkty: obserwacje; linie: modele bazowe po BU.",
+  szerokosc=uzg_cfg$styl$szerokosc,wysokosc=5.5)
+```
+
+Sumowanie kategorii poprawia średnie
+MASE i RMSSE modelu ETS, natomiast pogarsza obie miary ARIMA. Spójność sama
+w sobie nie daje przewagi: istotna jest jakość prognoz poziomu wejściowego.
+
+## Top-Down: od ogółem do kategorii
+
+TD zachowuje prognozę ogółem i rozdziela ją kolejno na grupy i kategorie:
+$\tilde y_{i,h}=p_{i|r,h}\tilde y_{r,h}$, gdzie $r$ jest rodzicem węzła $i$.
+Wariant **H** stosuje stałe udziały
+$p_{i|r}=\sum_{t\in trening}y_{i,t}/\sum_{t\in trening}y_{r,t}$.
+To stosunek sum, nie średnia miesięcznych udziałów.
+Wariant **P** stosuje udziały zmienne dla każdego miesiąca prognozy:
+$p_{i|r,h}=\hat y_{i,h}/\sum_{j\in dzieci(r)}\hat y_{j,h}$.
+H jest prostym odniesieniem; P zachowuje więcej informacji o sezonowej strukturze
+prognoz. Jego skuteczność zależy jednak od jakości prognoz dzieci.
+
+```{r uzg-td-tabela}
+tabela_praca(uzg_tabela_zmian(c("TD-H","TD-P")),podpis="TD: konfiguracje zmieniające prognozy BASE",
+  miejsca_dz=3,zrodlo="Opracowanie własne. Minus: poprawa; plus: pogorszenie względem BASE tego samego modelu.")
+```
+
+TD-P z Naive i SNaive pominięto w tabeli jako identyczne z BASE.
+Ogółem pominięto na wykresie, ponieważ TD zachowuje jego prognozę bazową.
+Dla czytelności pokazujemy dwie kategorie o największej bezwzględnej
+procentowej zmianie MASE wśród modeli i wariantów TD. Są to przykłady skrajnych zmian, wybrane po ocenie walidacji.
+
+```{r uzg-td-wniosek, results='asis'}
+cat(uzg_komentarz(c("TD-H","TD-P")))
+```
+
+```{r uzg-td-wykres, results='asis'}
+renderuj_rysunki_pracy(list(uzg_wykres(c("TD-H","TD-P"),uzg_wybor(c("TD-H","TD-P")))),
+  podpis="TD: wybrane kategorie, udziały historyczne i prognozowane",
+  zrodlo="Opracowanie własne. Punkty: obserwacje; linie: modele bazowe po TD.",
+  szerokosc=uzg_cfg$styl$szerokosc,wysokosc=4.5)
+```
+
+```{r uzg-td-pozostale-wykresy, include=FALSE}
+# Podgląd w RStudio: print(uzg_td_pozostale[[1]]) lub wybór elementu po nazwie.
+# Do PDF: ustaw include=TRUE, dodaj results='asis' i odkomentuj renderowanie.
+uzg_td_ids <- setdiff(uzg_meta$id_wezla[uzg_meta$poziom != "Ogółem"],
+  uzg_wybor(c("TD-H", "TD-P")))
+uzg_td_meta <- uzg_meta[match(uzg_td_ids, uzg_meta$id_wezla), ]
+uzg_td_panele <- split(uzg_td_ids, ifelse(uzg_td_meta$poziom == "Kategorie",
+  uzg_td_meta$grupa, uzg_td_meta$poziom))
+uzg_td_pozostale <- lapply(uzg_td_panele, function(ids)
+  uzg_wykres(c("TD-H", "TD-P"), ids))
+names(uzg_td_pozostale) <- vapply(uzg_td_panele, function(ids)
+  paste(uzg_meta$wezel[match(ids, uzg_meta$id_wezla)], collapse=" / "), character(1))
+# renderuj_rysunki_pracy(uzg_td_pozostale, podpis="TD: pozostałe szeregi",
+#   zrodlo="Opracowanie własne. Punkty: obserwacje; linie: modele bazowe po TD.",
+#   szerokosc=uzg_cfg$styl$szerokosc, wysokosc=4.5)
+```
+
+
+Kolumny wykresu porównują warianty H i P przy wspólnej skali każdego
+szeregu. Wariant TD-H zmniejszył średnie MASE Naive o około 1,44%, a RMSSE
+o 6,33%. Dla SNaive te same miary wzrosły odpowiednio o około 20,16%
+i 28,05%. Stały podział historyczny pomógł więc prognozom niesezonowym,
+lecz pogorszył wyniki prognoz powtarzających wzorzec roczny.
+
+Możliwym wyjaśnieniem jest nieuwzględnianie przez stałe udziały miesięcznych
+zmian struktury wpływów. Eksperyment pokazuje jednak samo pogorszenie;
+nie pozwala jednoznacznie ustalić jego przyczyny.
+
+Dla ARIMA wariant TD-P zmniejszył średnie RMSSE o około 1,06%, przy wzroście
+MASE o około 0,09%. Oznacza to niewielką poprawę według miary silniej
+uwzględniającej duże błędy, bez poprawy średniego błędu bezwzględnego.
+Dla ETS oba warianty TD uzyskały wyższe MASE i RMSSE niż BASE.
+
+## Middle-Out: punkt wyjścia na poziomie grup
+
+MO zachowuje bazowe prognozy Grupy 1 i Grupy 2, sumuje je do prognozy
+szeregu dochodów ogółem i rozdziela w dół na kategorie:
+
+\[
+\tilde y_{og,h}=\sum_g\hat y_{g,h},
+\qquad
+\tilde y_{i,h}=p_{i|g,h}\hat y_{g,h}.
+\]
+
+Indeks $g$ oznacza grupę, a $i$ kategorię należącą do tej grupy. H i P
+oznaczają te same reguły udziałów co w TD, stosowane wewnątrz grup.
+Metoda łączy agregację prognoz grup z ich podziałem na kategorie.
+Zachowuje różnice między grupami, ale błędy prognoz grup wpływają również
+na prognozy ich kategorii.
+
+```{r uzg-mo-tabela}
+tabela_praca(uzg_tabela_zmian(c("MO-H","MO-P")),podpis="MO: konfiguracje zmieniające prognozy BASE",
+  miejsca_dz=3,zrodlo="Opracowanie własne. Minus: poprawa; plus: pogorszenie względem BASE tego samego modelu.")
+```
+
+MO-P z Naive i SNaive pominięto w tabeli jako identyczne z BASE.
+Na wykresie pominięto grupy, zachowane przez MO z definicji, oraz ogółem:
+oba warianty MO dają tam tę samą sumę prognoz grup. Pokazujemy dwie kategorie
+wybrane według największej bezwzględnej zmiany MASE wśród modeli i wariantów MO,
+analogicznie jak w TD. Wyniki tabel obejmują wszystkie szeregi.
+
+```{r uzg-mo-wniosek, results='asis'}
+cat(uzg_komentarz(c("MO-H","MO-P")))
+```
+
+```{r uzg-mo-wykres, results='asis'}
+renderuj_rysunki_pracy(list(uzg_wykres(c("MO-H","MO-P"),uzg_wybor(c("MO-H","MO-P")))),
+  podpis="MO: wybrane kategorie, udziały historyczne i prognozowane",
+  zrodlo="Opracowanie własne. Punkty: obserwacje; linie: modele bazowe po MO.",
+  szerokosc=uzg_cfg$styl$szerokosc,wysokosc=4.5)
+```
+
+```{r uzg-mo-pozostale-wykresy, include=FALSE}
+# Podgląd w RStudio: print(uzg_mo_pozostale[[1]]) lub wybór elementu po nazwie.
+# Do PDF: ustaw include=TRUE, dodaj results='asis' i odkomentuj renderowanie.
+uzg_mo_ids <- setdiff(uzg_meta$id_wezla[uzg_meta$poziom != "Grupy"],
+  uzg_wybor(c("MO-H", "MO-P")))
+uzg_mo_meta <- uzg_meta[match(uzg_mo_ids, uzg_meta$id_wezla), ]
+uzg_mo_panele <- split(uzg_mo_ids, ifelse(uzg_mo_meta$poziom == "Kategorie",
+  uzg_mo_meta$grupa, uzg_mo_meta$poziom))
+uzg_mo_pozostale <- lapply(uzg_mo_panele, function(ids)
+  uzg_wykres(c("MO-H", "MO-P"), ids))
+names(uzg_mo_pozostale) <- vapply(uzg_mo_panele, function(ids)
+  paste(uzg_meta$wezel[match(ids, uzg_meta$id_wezla)], collapse=" / "), character(1))
+# renderuj_rysunki_pracy(uzg_mo_pozostale, podpis="MO: pozostałe szeregi",
+#   zrodlo="Opracowanie własne. Punkty: obserwacje; linie: modele bazowe po MO.",
+#   szerokosc=uzg_cfg$styl$szerokosc, wysokosc=4.5)
+```
+
+
+Różnice między H i P wynikają ze sposobu wyznaczenia udziałów: prognoza grupy
+wejściowej pozostaje taka sama. ARIMA z MO-P uzyskuje niewielką poprawę
+średniego MASE i wyraźniejszą poprawę RMSSE. Nie jest to poprawa każdego szeregu.
+MO-H pogarsza MASE wszystkich modeli; w przypadku Naive jednocześnie poprawia
+RMSSE, co pokazuje zależność oceny od wagi dużych błędów.
+
+## Podsumowanie wyników
+
+Najniższe średnie MASE (około 1,226) i RMSSE (około 0,831) w całym
+eksperymencie uzyskał SNaive BASE. BU, TD-P i MO-P powtarzają jego prognozy,
+nie dając dodatkowej poprawy. Wynik ten jest zgodny z przydatnością rocznego
+wzorca sezonowego w badanym okresie, ale nie dowodzi uniwersalnej przewagi.
+
+Korzyści z uzgadniania zależały od modelu wejściowego. ETS poprawił wyniki
+po BU, ARIMA nieznacznie po MO-P, a Naive po TD-H. Stałe udziały w części
+konfiguracji pogorszyły dokładność, mimo zapewnienia zgodności sum.
+Przykładowo historyczny podział może zawyżać prognozę małej kategorii,
+jeżeli jej udział w danym miesiącu jest niższy niż udział z całego treningu.
+
+Dotychczasowe eksperymenty nie wykazały poprawy najlepszej konfiguracji
+bazowej przez badane uzgodnienia w tym okresie walidacji. Nie oznacza to
+jednak braku korzyści dla wszystkich modeli. Zapewnienie zgodności prognoz
+kategorii, grup i całości pozostaje odrębną korzyścią, która nie gwarantuje
+mniejszych błędów. Wyniki nie uzasadniają więc zastąpienia wszystkich
+prognoz bazowych jedną metodą uzgadniania. Wnioski dotyczą jednego okresu
+walidacji i dotychczas zbadanych metod; nie rozstrzygają o skuteczności
+uzgadniania dla innych danych i okresów.
