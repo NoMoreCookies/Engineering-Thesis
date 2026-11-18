@@ -22,9 +22,12 @@ header-includes:
   - \usepackage{booktabs}
   - \usepackage{float}
   - \usepackage{fontspec}
-  - \setmainfont[Path=/usr/share/fonts/opentype/ebgaramond/,Extension=.otf,ItalicFont=EBGaramond12-Italic,BoldFont=EBGaramond12-Bold]{EBGaramond12-Regular}
+  - \usepackage{ebgaramond}
   - \usepackage{colortbl}
   - \usepackage{xcolor}
+editor_options: 
+  markdown: 
+    wrap: 72
 ---
 
 ```{r konfiguracja-wygladu, include=FALSE}
@@ -2453,13 +2456,13 @@ wykres_acf <- function(dane_acf) {
 
 \newpage
 
-# Dane 
+# Dane
 
 ## Charakterystyka danych
 
-`r opis_zrodla` Analiza obejmuje okres od `r miesiac(min(miesiace))`
-do `r miesiac(max(miesiace))`. Obserwacje są miesięczne, a kwoty
-wyrażamy w miliardach USD.
+`r opis_zrodla` Analiza obejmuje okres od `r miesiac(min(miesiace))` do
+`r miesiac(max(miesiace))`. Obserwacje są miesięczne, a kwoty wyrażamy w
+miliardach USD.
 
 ```{r charakterystyka-dane, include=FALSE}
 # OBLICZENIE WSKAŹNIKÓW | przygotowujemy dwukolumnową ramkę
@@ -2500,11 +2503,20 @@ tabela_praca(
 )
 ```
 
-Dane źródłowe obejmują 140 obserwacji miesięcznych, od marca 2015 r. do października 2026 r. Dziewięć kodów składowych zagregowano do siedmiu kategorii bazowych, uzyskując łącznie 980 obserwacji na najniższym poziomie hierarchii. Kontrola kompletności nie wykazała brakujących obserwacji dla analizowanych kodów w rozpatrywanym okresie.
+Dane źródłowe obejmują 140 obserwacji miesięcznych, od marca 2015 r. do
+października 2026 r. Dziewięć kodów składowych zagregowano do siedmiu
+kategorii bazowych, uzyskując łącznie 980 obserwacji na najniższym
+poziomie hierarchii. Kontrola kompletności nie wykazała brakujących
+obserwacji dla analizowanych kodów w rozpatrywanym okresie.
 
-Na potrzeby prognozowania hierarchicznego kategorie bazowe przypisano do dwóch grup pośrednich, obejmujących odpowiednio trzy i cztery kategorie.
-Podział ten przyjęto według kryterium ilościowego, dążąc do uzyskania agregatów o zbliżonej skali wpływów, a nie na podstawie podobieństwa ekonomicznego poszczególnych kategorii.
-Suma obu grup wyznacza najwyższy poziom hierarchii, odpowiadający całkowitym dochodom federalnym. Ostatecznie otrzymano strukturę obejmującą 10 szeregów czasowych na trzech poziomach agregacji: ogółem, grup i kategorii bazowych.
+Na potrzeby prognozowania hierarchicznego kategorie bazowe przypisano do
+dwóch grup pośrednich, obejmujących odpowiednio trzy i cztery kategorie.
+Podział ten przyjęto według kryterium ilościowego, dążąc do uzyskania
+agregatów o zbliżonej skali wpływów, a nie na podstawie podobieństwa
+ekonomicznego poszczególnych kategorii. Suma obu grup wyznacza najwyższy
+poziom hierarchii, odpowiadający całkowitym dochodom federalnym.
+Ostatecznie otrzymano strukturę obejmującą 10 szeregów czasowych na
+trzech poziomach agregacji: ogółem, grup i kategorii bazowych.
 
 ```{r sklad-grup-dane, include=FALSE}
 # PRZYGOTOWANIE TABELI | sortujemy grupy i kategorie,
@@ -2565,9 +2577,21 @@ tabela_praca(
 )
 ```
 
-Zbiór danych podzielono chronologicznie na część treningową obejmującą 128 miesięcy (marzec 2015 r. – październik 2025 r.) oraz część walidacyjną obejmującą ostatnie 12 miesięcy (listopad 2025 r. – październik 2026 r.). Zastosowanie podziału chronologicznego pozwala odtworzyć rzeczywiste warunki prognozowania, w których przewidywane są wartości przyszłe na podstawie wcześniejszych obserwacji.
+Zbiór danych podzielono chronologicznie na część treningową obejmującą
+128 miesięcy (marzec 2015 r. – październik 2025 r.) oraz część
+walidacyjną obejmującą ostatnie 12 miesięcy (listopad 2025 r. –
+październik 2026 r.). Zastosowanie podziału chronologicznego pozwala
+odtworzyć rzeczywiste warunki prognozowania, w których przewidywane są
+wartości przyszłe na podstawie wcześniejszych obserwacji.
 
-Horyzont walidacji równy 12 miesiącom odpowiada pełnemu cyklowi sezonowemu analizowanych szeregów. Umożliwia to ocenę dokładności prognoz w poszczególnych miesiącach roku, z uwzględnieniem potencjalnych wahań sezonowych. Wszystkie modele dopasowywane są wyłącznie do danych treningowych, natomiast obserwacje z okresu walidacyjnego wykorzystywane są do oceny jakości otrzymanych prognoz. Identyczny podział zastosowano dla wszystkich poziomów hierarchii, zapewniając porównywalność wyników pomiędzy poszczególnymi szeregami i metodami prognozowania.
+Horyzont walidacji równy 12 miesiącom odpowiada pełnemu cyklowi
+sezonowemu analizowanych szeregów. Umożliwia to ocenę dokładności
+prognoz w poszczególnych miesiącach roku, z uwzględnieniem potencjalnych
+wahań sezonowych. Wszystkie modele dopasowywane są wyłącznie do danych
+treningowych, natomiast obserwacje z okresu walidacyjnego wykorzystywane
+są do oceny jakości otrzymanych prognoz. Identyczny podział zastosowano
+dla wszystkich poziomów hierarchii, zapewniając porównywalność wyników
+pomiędzy poszczególnymi szeregami i metodami prognozowania.
 
 ```{r ustawienia-paneli-dane, include=FALSE}
 # IDENTYFIKACJA PANELI | wzbogacamy węzły o etykiety oraz grupujemy je
@@ -2633,7 +2657,13 @@ granica_walidacji <- geom_vline(
 
 ## Udział kategorii w dochodach ogółem
 
-W celu scharakteryzowania struktury dochodów federalnych USA wyznaczono procentowe udziały poszczególnych kategorii w łącznych wpływach. Obliczenia przeprowadzono na podstawie skumulowanych wartości dochodów z pełnych lat kalendarzowych należących do okresu treningowego (2016–2024). Udział każdej kategorii określono jako stosunek sumy jej wpływów do sumy wpływów wszystkich siedmiu kategorii bazowych w tym samym okresie. Otrzymane wyniki przedstawiono na rysunku 1.
+W celu scharakteryzowania struktury dochodów federalnych USA wyznaczono
+procentowe udziały poszczególnych kategorii w łącznych wpływach.
+Obliczenia przeprowadzono na podstawie skumulowanych wartości dochodów z
+pełnych lat kalendarzowych należących do okresu treningowego
+(2016–2024). Udział każdej kategorii określono jako stosunek sumy jej
+wpływów do sumy wpływów wszystkich siedmiu kategorii bazowych w tym
+samym okresie. Otrzymane wyniki przedstawiono na rysunku 1.
 
 ```{r udzialy-kategorii-dane, include=FALSE}
 # UDZIAŁY KATEGORII | wybieramy pełne lata treningu, sumujemy
@@ -2710,11 +2740,25 @@ if (nrow(pelne_lata) > 0L && suma_wplywow > 0) {
 
 ```
 
-Analiza struktury dochodów wskazuje na znaczną koncentrację wpływów w dwóch największych kategoriach. Największy udział mają podatki od osób fizycznych (49,7%), a następnie wpływy z tytułu ubezpieczeń społecznych i emerytur (34,7%). Kategorie te odpowiadają łącznie za 84,4% analizowanych dochodów federalnych USA.
+Analiza struktury dochodów wskazuje na znaczną koncentrację wpływów w
+dwóch największych kategoriach. Największy udział mają podatki od osób
+fizycznych (49,7%), a następnie wpływy z tytułu ubezpieczeń społecznych
+i emerytur (34,7%). Kategorie te odpowiadają łącznie za 84,4%
+analizowanych dochodów federalnych USA.
 
-Trzecią pod względem wielkości kategorię stanowią podatki od przedsiębiorstw, których udział wynosi 8,5%. Pozostałe cztery kategorie mają znacznie mniejsze znaczenie w strukturze wpływów, odpowiadając łącznie za 7,1% dochodów. Najmniejszy udział odnotowano w przypadku podatków od spadków i darowizn (0,6%).
+Trzecią pod względem wielkości kategorię stanowią podatki od
+przedsiębiorstw, których udział wynosi 8,5%. Pozostałe cztery kategorie
+mają znacznie mniejsze znaczenie w strukturze wpływów, odpowiadając
+łącznie za 7,1% dochodów. Najmniejszy udział odnotowano w przypadku
+podatków od spadków i darowizn (0,6%).
 
-Zaobserwowana dysproporcja wskazuje na istotne różnice skali pomiędzy szeregami czasowymi na najniższym poziomie hierarchii. Ma to znaczenie dla późniejszej oceny jakości prognoz, ponieważ miary błędów wyrażone w jednostkach bezwzględnych, takie jak MAE i RMSE, zależą od skali prognozowanych wartości. Z tego względu w analizie porównawczej zasadne jest uwzględnienie również miary MASE, umożliwiającej ocenę błędów względem prognoz metody odniesienia.
+Zaobserwowana dysproporcja wskazuje na istotne różnice skali pomiędzy
+szeregami czasowymi na najniższym poziomie hierarchii. Ma to znaczenie
+dla późniejszej oceny jakości prognoz, ponieważ miary błędów wyrażone w
+jednostkach bezwzględnych, takie jak MAE i RMSE, zależą od skali
+prognozowanych wartości. Z tego względu w analizie porównawczej zasadne
+jest uwzględnienie również miary MASE, umożliwiającej ocenę błędów
+względem prognoz metody odniesienia.
 
 ## Hierarchia
 
@@ -2824,7 +2868,7 @@ srodek <- mean(grupy_schemat$y)
 # Każda kategoria otrzymuje jeden stały kolor.
 
 paleta_hierarchii <- setNames(
-  paleta[1:7],
+  rep("#000000", 7)  ,
   wezly_schemat$kategoria
 )
 ```
@@ -2962,7 +3006,8 @@ ggplot() +
   )
 ```
 
-Grupa 1 odpowiada za 49,7% całkowitych wpływów, a Grupa 2 za pozostałe 50,3% w okresie treningowym.
+Grupa 1 odpowiada za 52,6% całkowitych wpływów, a Grupa 2 za pozostałe
+47,4% w okresie treningowym.
 
 ```{r zgodnosc-sumy-dane, include=FALSE}
 # PRZELICZENIE | wyznaczamy maksymalną bezwzględną różnicę
@@ -2987,7 +3032,6 @@ if (nrow(kontrola_sumy) > 0L) {
 
 \newpage
 
-
 # Przebiegi historyczne i sezonowość
 
 ## Przebiegi miesięczne
@@ -3002,13 +3046,12 @@ pionową, dzięki czemu widać zmiany również w mniejszych kategoriach.
 historia <- z_panelami(dane_ts)
 ```
 
-
 ### Dochody ogółem
 
 Na najwyższym poziomie hierarchii znajduje się szereg dochodów ogółem,
-stanowiący sumę wszystkich siedmiu kategorii bazowych.
-Analiza jego przebiegu pozwala ocenić długookresowe zmiany łącznych
-wpływów, występowanie wahań sezonowych oraz obserwacji odstających.
+stanowiący sumę wszystkich siedmiu kategorii bazowych. Analiza jego
+przebiegu pozwala ocenić długookresowe zmiany łącznych wpływów,
+występowanie wahań sezonowych oraz obserwacji odstających.
 
 ```{r historia-ogolem, results='asis'}
 id_ogolem <- wezly |>
@@ -3032,10 +3075,10 @@ wykres_szeregow(
 
 ### Grupy pośrednie
 
-Na drugim poziomie hierarchii znajdują się dwa agregaty pośrednie.
-Ich zestawienie umożliwia porównanie skali, zmienności i przebiegu
-wpływów w obu grupach. Zastosowano wspólną skalę pionową,
-aby umożliwić bezpośrednie porównanie wartości.
+Na drugim poziomie hierarchii znajdują się dwa agregaty pośrednie. Ich
+zestawienie umożliwia porównanie skali, zmienności i przebiegu wpływów w
+obu grupach. Zastosowano wspólną skalę pionową, aby umożliwić
+bezpośrednie porównanie wartości.
 
 ```{r historia-grupy, results='asis'}
 id_grupy <- wezly |>
@@ -3059,9 +3102,9 @@ wykres_szeregow(
 
 ### Kategorie bazowe — Grupa 1
 
-Grupa 1 obejmuje podatki od osób fizycznych, akcyzę oraz podatki
-od spadków i darowizn. Ze względu na znaczne różnice skali
-poszczególnych kategorii zastosowano niezależne skale pionowe.
+Grupa 1 obejmuje podatki od osób fizycznych, akcyzę oraz podatki od
+spadków i darowizn. Ze względu na znaczne różnice skali poszczególnych
+kategorii zastosowano niezależne skale pionowe.
 
 ```{r historia-kategorie-grupa1, results='asis'}
 id_grupa1 <- wezly |>
@@ -3088,10 +3131,10 @@ wykres_szeregow(
 
 ### Kategorie bazowe — Grupa 2
 
-Grupa 2 obejmuje wpływy z ubezpieczeń społecznych i emerytur,
-podatki od przedsiębiorstw, cła oraz pozostałe dochody.
-Niezależne skale pionowe pozwalają przedstawić zmienność
-każdego szeregu pomimo różnic w poziomie wpływów.
+Grupa 2 obejmuje wpływy z ubezpieczeń społecznych i emerytur, podatki od
+przedsiębiorstw, cła oraz pozostałe dochody. Niezależne skale pionowe
+pozwalają przedstawić zmienność każdego szeregu pomimo różnic w poziomie
+wpływów.
 
 ```{r historia-kategorie-grupa2, results='asis'}
 id_grupa2 <- wezly |>
@@ -3114,13 +3157,12 @@ wykres_szeregow(
 )
 ```
 
-
 ## Wykresy sezonowe
 
-Każda linia przedstawia jeden pełny rok treningowy. Ciemniejsze
-linie odpowiadają późniejszym latom. Zestawienie tych samych miesięcy
-pokazuje, czy moment szczytu powtarza się mimo różnic w poziomie
-wpływów między latami.
+Każda linia przedstawia jeden pełny rok treningowy. Ciemniejsze linie
+odpowiadają późniejszym latom. Zestawienie tych samych miesięcy
+pokazuje, czy moment szczytu powtarza się mimo różnic w poziomie wpływów
+między latami.
 
 ```{r sezonowosc-dane, include=FALSE}
 # DANE SEZONOWE | wybieramy pełne lata treningowe,
@@ -3135,14 +3177,10 @@ nazwy_miesiecy <- c("sty", "lut", "mar", "kwi", "maj", "cze",
                    "lip", "sie", "wrz", "paź", "lis", "gru")
 ```
 
-
-
-
-
-
 ### Dochody ogółem
 
-Na poziomie ogółem analizujemy przebieg sezonowy łącznych miesięcznych wpływów.
+Na poziomie ogółem analizujemy przebieg sezonowy łącznych miesięcznych
+wpływów.
 
 ```{r sezonowosc-ogolem, results='asis'}
 wykres_sezonowosci(
@@ -3216,7 +3254,6 @@ wykres_sezonowosci(
 )
 ```
 
-
 ```{r wnioski-sezonowe-dane, include=FALSE}
 # WNIOSKI SEZONOWE | wyznaczamy dla każdego węzła miesiąc
 # powtarzającego się maksimum, jeżeli jest jednoznaczny.
@@ -3252,12 +3289,12 @@ for (i in seq_len(nrow(szczyty_roku))) {
 # Autokorelacja szeregów treningowych
 
 Funkcja autokorelacji (ACF) pokazuje zależność między obserwacjami
-oddalonymi o określoną liczbę miesięcy. Wysokie dodatnie wartości
-dla małych opóźnień, które stopniowo maleją, mogą wskazywać na trend
-lub inną trwałą zależność w czasie. Lokalne maksima przy 12, 24
-i kolejnych wielokrotnościach 12 miesięcy sugerują sezonowość roczną.
-Oba wzorce mogą występować jednocześnie.
-[Hyndman i Athanasopoulos, sekcja o autokorelacji](https://otexts.com/fpp3/graphics.html#autocorrelation).
+oddalonymi o określoną liczbę miesięcy. Wysokie dodatnie wartości dla
+małych opóźnień, które stopniowo maleją, mogą wskazywać na trend lub
+inną trwałą zależność w czasie. Lokalne maksima przy 12, 24 i kolejnych
+wielokrotnościach 12 miesięcy sugerują sezonowość roczną. Oba wzorce
+mogą występować jednocześnie. [Hyndman i Athanasopoulos, sekcja o
+autokorelacji](https://otexts.com/fpp3/graphics.html#autocorrelation).
 
 ```{r dane-acf, include=FALSE}
 # OBLICZANIE ACF | dla każdej serii wyznaczamy korelacje
@@ -3287,7 +3324,6 @@ acf_trening <- z_panelami(trening) |>
   left_join(wezly, by = "id_wezla")
 ```
 
-
 Kolorem wyróżniamy wielokrotności roku. Przerywane linie poziome
 oznaczają przybliżone granice 95% dla pojedynczego opóźnienia przy
 założeniu białego szumu. Kształt całej funkcji pomaga w interpretacji,
@@ -3314,6 +3350,9 @@ renderuj_rysunki_pracy(
 )
 ```
 
+Podwyższone wartości autokorelacji przy opóźnieniach 12, 24 i 36 miesięcy wskazują na sezonowość roczną. Wzorzec widoczny przy krótszych opóźnieniach również powtarza się co 12 miesięcy, o czym świadczą sekwencje 3, 9, 12 oraz 15, 21, 24 i 27, 33, 36. Bardzo powolne zmniejszanie wartości funkcji ACF wskazuje na istnienie trendu w danych.  
+
+**Wniosek** : Zaobserwowany wzorzec uzasadnia uwzględnienie sezonowości o okresie 12 miesięcy w modelach prognostycznych.
 
 ```{r acf-grupy, results='asis'}
 # Porównanie ACF dwóch agregatów pośrednich.
@@ -3336,6 +3375,12 @@ renderuj_rysunki_pracy(
 )
 ```
 
+- **GRUPA 1**
+    Najwyższą wartość autokorelacji odnotowano przy opóźnieniu 12 miesięcy (około 0,57). Lokalne maksima występują również przy opóźnieniach 24 i 36 miesięcy, gdzie autokorelacja wynosi około 0,4.
+    **Wniosek** Powtarzanie się lokalnych maksimów co 12 miesięcy wskazuje na sezonowość roczną i uzasadnia uwzględnienie modeli sezonowych w porównaniu metod prognostycznych.Powoli malejący wykres acf wskazuje również na trend.
+- **Grupa 2**
+    Najwyższe wartości autokorelacji występują przy opóźnieniach 12, 24 i 36 miesięcy i wynoszą odpowiednio około 0,79, 0,61 i 0,44. Maksima sezonowe maleją wraz ze wzrostem opóźnienia.
+    **Wniosek** Wykres wskazuje na sezonowość roczną. Wyższa autokorelacja przy opóźnieniach 12 i 24 miesięcy oznacza, że obserwacje z tego samego miesiąca oddalone o rok lub dwa lata są w tej grupie silniej skorelowane niż w grupie 1.Powoli malejący wykres acf wskazuje również na trend.
 
 ```{r acf-kategorie-grupa1, results='asis'}
 # ACF trzech kategorii należących do Grupy 1:
@@ -3365,7 +3410,7 @@ renderuj_rysunki_pracy(
   wysokosc = 4.5
 )
 ```
-
+W szeregach wpływów z akcyzy i podatków od osób fizycznych widoczne są lokalne maksima autokorelacji przy opóźnieniach 12, 24 i 36 miesięcy. Ich regularne rozmieszczenie wskazuje na sezonowość roczną. W przypadku podatków od osób fizycznych sygnał ten jest wyraźniejszy, szczególnie przy opóźnieniu 12 miesięcy. Dla wpływów z podatku od spadków i darowizn wartości autokorelacji są przeważnie niewielkie, a przy wielokrotnościach 12 miesięcy brak powtarzalnych maksimów. Wykres ACF tej kategorii nie dostarcza zatem wyraźnych przesłanek wskazujących na sezonowość roczną.
 
 ```{r acf-kategorie-grupa2, results='asis'}
 # ACF czterech kategorii należących do Grupy 2:
@@ -3396,6 +3441,14 @@ renderuj_rysunki_pracy(
   wysokosc = 4.5
 )
 ```
+- **Cła**
+  Wysoka dodatnia autokorelacja przy pierwszych opóźnieniach szybko maleje. Wskazuje to na silną zależność między obserwacjami z sąsiednich miesięcy. Przy opóźnieniach 12, 24 i 36 miesięcy nie widać regularnych maksimów wskazujących na sezonowość roczną.
+- **Podatki od przedsiębiorstw**
+  Wyraźne maksima przy opóźnieniach 12, 24 i 36 miesięcy wskazują na sezonowość roczną. To dominujący wzorzec widoczny na wykresie ACF.
+- **Pozostałe dochody**
+  Dodatnia autokorelacja utrzymuje się przez kilkanaście opóźnień i stopniowo maleje. Taki przebieg jest zgodny z obecnością trendu, a przy wielokrotnościach 12 miesięcy brak wyraźnego, powtarzalnego wzorca sezonowego.
+- **Ubezpieczenia i emerytury**
+  Dodatnia autokorelacja utrzymuje się dla wielu kolejnych opóźnień, co jest zgodne z obecnością trendu. Na tym tle wyróżniają się maksima przy opóźnieniach 12, 24 i 36 miesięcy, które wskazują na sezonowość roczną.
 
 ```{r wnioski-acf-dane, include=FALSE}
 # WNIOSKI Z ACF | zliczamy powtarzające się roczne maksima
@@ -3441,11 +3494,11 @@ if (nrow(najwieksza_acf) > 0L) {
 
 ## Poziomy a zmiany miesięczne
 
-Pierwsza różnica to wpływy w danym miesiącu pomniejszone o wpływy
-z poprzedniego miesiąca. Dla dochodów ogółem i wybranych kategorii
+Pierwsza różnica to wpływy w danym miesiącu pomniejszone o wpływy z
+poprzedniego miesiąca. Dla dochodów ogółem i wybranych kategorii
 porównujemy ACF poziomów z ACF tych zmian. Jeśli po różnicowaniu
-krótkookresowa autokorelacja słabnie, zależność widoczna dla poziomów
-w mniejszym stopniu przenosi się na miesięczne zmiany.
+krótkookresowa autokorelacja słabnie, zależność widoczna dla poziomów w
+mniejszym stopniu przenosi się na miesięczne zmiany.
 
 ```{r acf-roznic-dane, include=FALSE}
 # DANE PORÓWNAWCZE | liczymy ACF pierwszych różnic
@@ -3516,13 +3569,16 @@ if (all(c("Poziom", "Pierwsza różnica") %in% names(acf_najkrotsza))) {
 
 Każdą metodę dopasowujemy osobno do każdego węzła hierarchii.
 
-- **Naive** powtarza ostatnią zaobserwowaną wartość.
-- **SNaive** powtarza wartość z odpowiadającego miesiąca ostatniego dostępnego cyklu rocznego.
-- **ETS** dobiera składowe wygładzania wykładniczego na podstawie AICc.
-- **ARIMA** dobiera rzędy modelu z uwzględnieniem składowej sezonowej, wykorzystując AICc do porównania modeli kandydujących.
+-   **Naive** powtarza ostatnią zaobserwowaną wartość.
+-   **SNaive** powtarza wartość z odpowiadającego miesiąca ostatniego
+    dostępnego cyklu rocznego.
+-   **ETS** dobiera składowe wygładzania wykładniczego na podstawie
+    AICc.
+-   **ARIMA** dobiera rzędy modelu z uwzględnieniem składowej sezonowej,
+    wykorzystując AICc do porównania modeli kandydujących.
 
-[Dokumentacja ETS](https://fable.tidyverts.org/reference/ETS.html)
-oraz [dokumentacja ARIMA](https://fable.tidyverts.org/reference/ARIMA.html).
+[Dokumentacja ETS](https://fable.tidyverts.org/reference/ETS.html) oraz
+[dokumentacja ARIMA](https://fable.tidyverts.org/reference/ARIMA.html).
 
 ```{r modele-i-prognozy, include=FALSE}
 # MODELE I PROGNOZY | dopasowujemy Naive, SNaive, ETS i ARIMA
@@ -3550,8 +3606,8 @@ stopifnot(
 ```
 
 Każda ścieżka prognozy powstaje na koniec treningu. Ciemna linia
-pokazuje rzeczywiste wpływy. Zacienienie i pionowa kreska wskazują
-okres walidacji. Panele mają osobne skale pionowe.
+pokazuje rzeczywiste wpływy. Zacienienie i pionowa kreska wskazują okres
+walidacji. Panele mają osobne skale pionowe.
 
 ```{r prognozy-wykres-dane, include=FALSE}
 # DANE WYKRESU PROGNOZ | ograniczamy historię do ostatnich
@@ -3597,9 +3653,9 @@ for (ids in zestawy_paneli) {
 
 ## Interpretacja pierwszych prognoz
 
-Dla wybranych szeregów porównujemy termin najwyższych wpływów
-oraz sprawdzamy, czy obserwacja w tym miesiącu mieści się pomiędzy
-najniższą i najwyższą prognozą punktową.
+Dla wybranych szeregów porównujemy termin najwyższych wpływów oraz
+sprawdzamy, czy obserwacja w tym miesiącu mieści się pomiędzy najniższą
+i najwyższą prognozą punktową.
 
 ```{r komentarz-prognoz-dane, include=FALSE}
 # PORÓWNANIE SZCZYTÓW | identyfikujemy największe wartości obserwacji
@@ -3660,15 +3716,16 @@ for (id in wezly_omawiane$id_wezla) {
 
 Ocenę przeprowadzono na okresie walidacji (`r zakres(daty_walidacji)`).
 Dla każdego węzła wszystkie modele porównano na tych samych miesiącach.
-MAE to średnia bezwzględna wartość błędu, a RMSE to pierwiastek ze średniej
-kwadratów błędów. Obie miary wyrażono w mld USD.
+MAE to średnia bezwzględna wartość błędu, a RMSE to pierwiastek ze
+średniej kwadratów błędów. Obie miary wyrażono w mld USD.
 
-MASE i RMSSE to odpowiednio MAE i RMSE podzielone przez analogiczną miarę
-błędu sezonowej metody naiwnej w próbie treningowej. Błąd odniesienia
-to różnica między obserwacją a wartością sprzed `r okres_sezonowy`
-miesięcy. Skalę oblicza się oddzielnie dla każdego węzła i stosuje wspólnie
-dla wszystkich jego modeli. Przy zerowej skali MASE i RMSSE są nieokreślone.
-[Definicje miar błędu prognoz](https://otexts.com/fpp3/toolbox.html#evaluating-point-forecast-accuracy).
+MASE i RMSSE to odpowiednio MAE i RMSE podzielone przez analogiczną
+miarę błędu sezonowej metody naiwnej w próbie treningowej. Błąd
+odniesienia to różnica między obserwacją a wartością sprzed
+`r okres_sezonowy` miesięcy. Skalę oblicza się oddzielnie dla każdego
+węzła i stosuje wspólnie dla wszystkich jego modeli. Przy zerowej skali
+MASE i RMSSE są nieokreślone. [Definicje miar błędu
+prognoz](https://otexts.com/fpp3/toolbox.html#evaluating-point-forecast-accuracy).
 
 ```{r miary-prognoz-dane, include=FALSE}
 # Łączymy prognozy punktowe z obserwacjami po węźle i miesiącu.
@@ -3747,8 +3804,9 @@ tabele_miar_prognoz <- setNames(lapply(miary_do_tabel, function(miara) {
 }), miary_do_tabel)
 ```
 
-Dla każdego szeregu pogrubiono najniższą wartość danej miary. Jeżeli kilka
-modeli osiągnęło to samo minimum, wyróżniono wszystkie remisujące wyniki.
+Dla każdego szeregu pogrubiono najniższą wartość danej miary. Jeżeli
+kilka modeli osiągnęło to samo minimum, wyróżniono wszystkie remisujące
+wyniki.
 
 ```{r miary-prognoz-mae}
 tabela_praca(
@@ -3794,12 +3852,27 @@ tabela_praca(
 )
 ```
 
-Wyniki walidacji uzasadniają dobór modeli bazowych osobno dla poszczególnych węzłów hierarchii. Model SNaive uzyskał najniższe wartości wszystkich analizowanych miar dla dochodów ogółem, Grupy 1, akcyzy, podatków od osób fizycznych oraz pozostałych dochodów. Model ETS osiągnął najniższe błędy dla ceł, podatków od przedsiębiorstw oraz ubezpieczeń i emerytur, a model ARIMA dla Grupy 2. W przypadku Grupy 2 przewaga ARIMA nad SNaive była niewielka. Przykładowo wartości RMSE wyniosły odpowiednio 31,18 i 31,44 mld USD.
+Wyniki walidacji uzasadniają dobór modeli bazowych osobno dla
+poszczególnych węzłów hierarchii. Model SNaive uzyskał najniższe
+wartości wszystkich analizowanych miar dla dochodów ogółem, Grupy 1,
+akcyzy, podatków od osób fizycznych oraz pozostałych dochodów. Model ETS
+osiągnął najniższe błędy dla ceł, podatków od przedsiębiorstw oraz
+ubezpieczeń i emerytur, a model ARIMA dla Grupy 2. W przypadku Grupy 2
+przewaga ARIMA nad SNaive była niewielka. Przykładowo wartości RMSE
+wyniosły odpowiednio 31,18 i 31,44 mld USD.
 
-Dla podatków od spadków i darowizn wybór zależy od przyjętej miary. Model SNaive osiągnął najniższy MAE (0,86 mld USD), a ETS najniższy RMSE (1,11 mld USD). Jeżeli jako główne kryterium doboru przyjęto MAE, do dalszej analizy można wybrać SNaive. Przy większej wadze dużych błędów, mierzonej przez RMSE, wyniki wskazują na ETS.
+Dla podatków od spadków i darowizn wybór zależy od przyjętej miary.
+Model SNaive osiągnął najniższy MAE (0,86 mld USD), a ETS najniższy RMSE
+(1,11 mld USD). Jeżeli jako główne kryterium doboru przyjęto MAE, do
+dalszej analizy można wybrać SNaive. Przy większej wadze dużych błędów,
+mierzonej przez RMSE, wyniki wskazują na ETS.
 
-Szczególnie trudnym szeregiem w badanym okresie okazały się cła. Nawet najlepiej oceniony model ETS uzyskał MASE równe 7,80 i RMSSE równe 4,74. Oznacza to, że błędy na walidacji były wyraźnie większe od sezonowej skali odniesienia wyznaczonej dla tego szeregu na treningu.
+Szczególnie trudnym szeregiem w badanym okresie okazały się cła. Nawet
+najlepiej oceniony model ETS uzyskał MASE równe 7,80 i RMSSE równe 4,74.
+Oznacza to, że błędy na walidacji były wyraźnie większe od sezonowej
+skali odniesienia wyznaczonej dla tego szeregu na treningu.
 
+```{=html}
 <!--
 Do dalszych etapów:
 - dane_ts, trening i walidacja zachowują klucze hierarchii fabletools.
@@ -3811,3 +3884,4 @@ Do dalszych etapów:
   mapa_grup (CSV nie musi jej zawierać). Jeśli plik zawiera sumę, określa ją
   etykieta_sumy. Zmienna zrodlo pozwala zaktualizować opis pochodzenia.
 -->
+```
